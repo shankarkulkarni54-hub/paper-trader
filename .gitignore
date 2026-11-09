@@ -9,6 +9,7 @@ env/
 
 # Python bytecode & cache
 .cache/
+.cache_midcap/
 __pycache__/
 *.py[cod]
 *$py.class
