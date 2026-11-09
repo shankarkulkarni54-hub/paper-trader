@@ -10,15 +10,17 @@ import ta
 
 from bot import load_nifty200_universe
 
-# Backtest Configuration (2-Stage Dynamic ATR Trailing Engine)
+# Backtest Configuration (Dynamic Compounding & Sector Diversified Engine)
 INITIAL_CAPITAL = 200000.0
-MAX_CONCURRENT_POSITIONS = 5                                    # 5 concurrent slots
-MAX_SLOT_CAPITAL = INITIAL_CAPITAL / MAX_CONCURRENT_POSITIONS  # Rs 40,000 max allocation per slot
-RISK_PER_TRADE = 2000.0                                        # Rs 2,000 (1% of starting capital)
-FRICTION_RATE = 0.0015                                         # 0.15% round-trip brokerage & friction
+MAX_CONCURRENT_POSITIONS = 5                     # 5 concurrent slots
+RISK_PCT_PER_TRADE = 0.01                        # 1.0% dynamic risk of current portfolio equity
+MAX_SLOT_PCT = 0.20                              # Max 20% capital deployed per slot
+FRICTION_RATE = 0.0015                           # 0.15% round-trip friction / brokerage
+STCG_TAX_RATE = 0.20                             # 20% Short-Term Capital Gains Tax
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 RESULTS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_results.csv")
+LOCAL_CSV_NAME = "nifty200.csv"
 
 # Ensure UTF-8 output on Windows consoles
 if hasattr(sys.stdout, "reconfigure"):
@@ -32,6 +34,23 @@ def get_cache_path(symbol: str) -> str:
     """Return local CSV path for a given symbol in .cache/."""
     safe_name = symbol.replace("^", "").strip()
     return os.path.join(CACHE_DIR, f"{safe_name}.csv")
+
+
+def load_symbol_sector_map() -> Dict[str, str]:
+    """Load primary sector/industry for each Nifty 200 stock from local CSV."""
+    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), LOCAL_CSV_NAME)
+    sector_map = {}
+    if os.path.exists(csv_path):
+        try:
+            df = pd.read_csv(csv_path)
+            for _, r in df.iterrows():
+                if "Symbol" in r and "Industry" in r:
+                    sym = f"{str(r['Symbol']).strip()}.NS"
+                    ind = str(r["Industry"]).strip() if pd.notna(r["Industry"]) else "Diversified"
+                    sector_map[sym] = ind
+        except Exception as e:
+            print(f"[WARN] Error reading sector map: {e}")
+    return sector_map
 
 
 def load_or_fetch_all_data(symbols: List[str], period: str = "4y") -> Dict[str, pd.DataFrame]:
@@ -136,10 +155,11 @@ def precalculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
-    """Execute the full 3-year backtest simulation with 2-Stage Dynamic ATR Trailing Stops."""
+    """Execute dynamic compounding, sector-diversified backtest simulation."""
     universe = load_nifty200_universe()
     all_symbols = ["^NSEI"] + universe
 
+    sector_map = load_symbol_sector_map()
     raw_data = load_or_fetch_all_data(all_symbols, period="4y")
 
     if "^NSEI" not in raw_data or raw_data["^NSEI"].empty:
@@ -165,7 +185,7 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
             "is_bullish": (c > e50) if e50 > 0 else True,
         }
 
-    # Precalculate all stock indicators & create fast date lookup
+    # Precalculate stock indicators & create fast date lookup
     stock_lookups = {}
     valid_stocks = 0
     for sym in universe:
@@ -191,7 +211,7 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
             stock_lookups[sym] = records
             valid_stocks += 1
 
-    print(f"[PRECOMPUTE] Precomputed indicators for {valid_stocks} Nifty 200 stocks.")
+    print(f"[PRECOMPUTE] Precomputed indicators for {valid_stocks} Nifty 200 stocks across sectors.")
 
     # Determine 3-year backtest date range
     all_nifty_dates = sorted(list(nifty_dict.keys()))
@@ -203,10 +223,12 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
     # Filter dates that fall within the last 3 years
     backtest_dates = [d for d in all_nifty_dates if d >= start_date_str]
 
-    print(f"\n[SIMULATION] Starting 3-year backtest (2-Stage Dynamic ATR Trailing Stops):")
+    print(f"\n[SIMULATION] Starting 3-year backtest (Dynamic Compounding & Sector Diversified):")
     print(f"             Window: {backtest_dates[0]} to {backtest_dates[-1]} ({len(backtest_dates)} trading sessions)")
-    print(f"             Initial Capital: Rs {INITIAL_CAPITAL:,.2f} | Max Slots: {MAX_CONCURRENT_POSITIONS} (Rs {MAX_SLOT_CAPITAL:,.2f}/slot)")
-    print(f"             Risk per Trade : Rs {RISK_PER_TRADE:,.2f} | Dynamic Trailing: Stage 1 (+1.5R BE) -> Stage 2 (+2.5R Chandelier)")
+    print(f"             Initial Capital: Rs {INITIAL_CAPITAL:,.2f} | Max Concurrent Slots: {MAX_CONCURRENT_POSITIONS}")
+    print(f"             Dynamic Risk: 1.0% of Portfolio Equity per trade | Max Slot Capital: 20% of Portfolio Equity")
+    print(f"             Sector Limit: Max 1 active position per sector at any time")
+    print(f"             Trailing Stop: Stage 1 (+1.5R Breakeven) -> Stage 2 (+2.5R Chandelier 2.5x ATR)")
 
     # Simulation State
     cash = INITIAL_CAPITAL
@@ -235,6 +257,7 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
             entry_price = pos["entry_price"]
             qty = pos["qty"]
             per_share_risk = pos["per_share_risk"]
+            trade_risk = pos["trade_risk"]
 
             # Check if current stop-loss is breached today
             if low <= pos["stop_loss"]:
@@ -271,15 +294,14 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
                 if close > pos["highest_close"]:
                     pos["highest_close"] = close
 
-                # Track peak unrealized R achieved
+                # Track peak unrealized profit & R achieved
                 unrealized_peak_gain = high - entry_price
                 current_r = unrealized_peak_gain / per_share_risk
                 if current_r > pos["max_r_reached"]:
                     pos["max_r_reached"] = round(current_r, 2)
 
-                # Stage 2: When unrealized profit crosses +2.5R (+Rs 5,000)
-                # Activate Chandelier Trailing Stop = Highest Daily Close - (2.5 * ATR)
-                if current_r >= 2.5 or (unrealized_peak_gain * qty) >= 5000.0:
+                # Stage 2: When unrealized profit reaches +2.5R (or +2.5 * initial risk)
+                if current_r >= 2.5 or (unrealized_peak_gain * qty) >= (2.5 * trade_risk):
                     pos["stage"] = 2
                     chandelier_stop = round(pos["highest_close"] - (2.5 * atr), 2)
 
@@ -291,9 +313,8 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
                     if pos["stop_loss"] < entry_price:
                         pos["stop_loss"] = entry_price
 
-                # Stage 1: When unrealized profit reaches +1.5R (+Rs 3,000)
-                # Move Stop-Loss to Entry Price (Breakeven)
-                elif current_r >= 1.5 or (unrealized_peak_gain * qty) >= 3000.0:
+                # Stage 1: When unrealized profit reaches +1.5R (or +1.5 * initial risk)
+                elif current_r >= 1.5 or (unrealized_peak_gain * qty) >= (1.5 * trade_risk):
                     if pos["stage"] < 1:
                         pos["stage"] = 1
                     if entry_price > pos["stop_loss"]:
@@ -304,7 +325,19 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
         open_positions = still_open
 
         # -------------------------------------------------------------
-        # Step 2: Benchmark Regime Filter & New Setup Screening
+        # Step 2: Compute Current Mark-to-Market Portfolio Equity
+        # -------------------------------------------------------------
+        current_open_val = 0.0
+        for p in open_positions:
+            sym = p["symbol"]
+            curr_bar = stock_lookups.get(sym, {}).get(d)
+            curr_close = curr_bar["Close"] if curr_bar else p["entry_price"]
+            current_open_val += curr_close * p["qty"]
+
+        current_portfolio_equity = cash + current_open_val
+
+        # -------------------------------------------------------------
+        # Step 3: Benchmark Regime Filter & New Setup Screening
         # -------------------------------------------------------------
         available_slots = MAX_CONCURRENT_POSITIONS - len(open_positions)
         nifty_bar = nifty_dict.get(d)
@@ -314,6 +347,8 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
         if available_slots > 0 and is_bullish_regime:
             candidates = []
             open_symbols = {p["symbol"] for p in open_positions}
+            # Sector Diversification: Map active sectors currently held
+            active_sectors = {p["sector"] for p in open_positions}
 
             for sym in universe:
                 if sym in open_symbols:
@@ -334,7 +369,7 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
                 atr = bar["ATR_14"]
                 vol_sma = bar["VOL_SMA_20"]
 
-                # Updated Confluence Setup Rules:
+                # Setup Confluence Rules:
                 # 1. Macro Trend: Close > 200 EMA and 20 EMA > 50 EMA
                 # 2. Pullback Dynamic: Low <= 20 EMA, Close > 20 EMA, Close >= Open
                 # 3. RSI Filter: 40.0 <= RSI <= 65.0
@@ -347,19 +382,27 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
                     (atr > 0.05)
                 ):
                     rs = (bar["Ret_20"] - nifty_ret20) * 100.0
+                    sector = sector_map.get(sym, "Diversified")
                     candidates.append({
                         "symbol": sym,
                         "bar": bar,
                         "relative_strength": rs,
+                        "sector": sector,
                     })
 
             # Rank candidates by 20-day Relative Strength descending
             candidates.sort(key=lambda x: x["relative_strength"], reverse=True)
 
-            # Enter top candidates
+            # Enter top candidates with Sector Diversification Guard (Max 1 position per sector)
             for cand in candidates:
                 if available_slots <= 0:
                     break
+
+                sector = cand["sector"]
+
+                # Sector Diversification Guard: Skip if sector is already held in portfolio
+                if sector in active_sectors:
+                    continue
 
                 sym = cand["symbol"]
                 bar = cand["bar"]
@@ -369,27 +412,37 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
                 if per_share_risk <= 0.05:
                     continue
 
-                initial_stop_loss = round(entry_price - per_share_risk, 2)
+                # Dynamic Compounding: 1.0% of Current Portfolio Equity
+                dynamic_risk = current_portfolio_equity * RISK_PCT_PER_TRADE
+                dynamic_risk = max(1000.0, dynamic_risk)  # Prudent floor
 
-                # Position sizing: floor(2000 / Per-Share Risk)
-                raw_qty = int(math.floor(RISK_PER_TRADE / per_share_risk))
-                # Capital slot limit: Rs 40,000 max per slot, bounded by available cash
-                max_qty_by_slot = int(math.floor(min(cash, MAX_SLOT_CAPITAL) / entry_price))
+                # Position sizing: floor(dynamic_risk / (1.5 * ATR))
+                raw_qty = int(math.floor(dynamic_risk / per_share_risk))
+
+                # Capital Slot Cap: Max 20% of Portfolio Equity per slot, bounded by available cash
+                max_slot_capital = current_portfolio_equity * MAX_SLOT_PCT
+                max_qty_by_slot = int(math.floor(min(cash, max_slot_capital) / entry_price))
                 qty = min(raw_qty, max_qty_by_slot)
 
                 if qty >= 1:
                     total_cost = round(qty * entry_price, 2)
                     cash = round(cash - total_cost, 2)
                     available_slots -= 1
+                    active_sectors.add(sector)  # Guard sector
+
+                    initial_stop_loss = round(entry_price - per_share_risk, 2)
+                    actual_trade_risk = round(qty * per_share_risk, 2)
 
                     new_pos = {
                         "id": trade_id_counter,
                         "symbol": sym,
+                        "sector": sector,
                         "entry_date": d,
                         "entry_price": entry_price,
                         "qty": qty,
                         "cost": total_cost,
                         "per_share_risk": per_share_risk,
+                        "trade_risk": actual_trade_risk,
                         "atr": atr,
                         "initial_stop_loss": initial_stop_loss,
                         "stop_loss": initial_stop_loss,
@@ -411,20 +464,20 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
                     open_positions.append(new_pos)
 
         # -------------------------------------------------------------
-        # Step 3: Record Daily Portfolio Valuation
+        # Step 4: Record Daily Portfolio Valuation
         # -------------------------------------------------------------
-        open_val = 0.0
+        eod_open_val = 0.0
         for p in open_positions:
             sym = p["symbol"]
             curr_bar = stock_lookups.get(sym, {}).get(d)
             curr_close = curr_bar["Close"] if curr_bar else p["entry_price"]
-            open_val += curr_close * p["qty"]
+            eod_open_val += curr_close * p["qty"]
 
-        daily_equity = cash + open_val
+        daily_equity = cash + eod_open_val
         equity_curve.append({
             "Date": d,
             "Cash": round(cash, 2),
-            "OpenPositionsVal": round(open_val, 2),
+            "OpenPositionsVal": round(eod_open_val, 2),
             "TotalEquity": round(daily_equity, 2),
             "ActiveTrades": len(open_positions),
         })
@@ -453,17 +506,27 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
     df_equity = pd.DataFrame(equity_curve)
 
     # -------------------------------------------------------------
-    # Performance Metrics Calculation
+    # Performance & Net Tax Metrics Calculation
     # -------------------------------------------------------------
     start_equity = INITIAL_CAPITAL
     final_equity = df_equity["TotalEquity"].iloc[-1]
     total_net_pnl = final_equity - start_equity
     strategy_return_pct = (total_net_pnl / start_equity) * 100.0
 
-    # Nifty 50 Buy & Hold Return over the exact same period
+    # Date duration & years for CAGR
+    start_dt = pd.to_datetime(backtest_dates[0])
+    end_dt = pd.to_datetime(backtest_dates[-1])
+    years = (end_dt - start_dt).days / 365.25
+
+    # Pre-Tax CAGR
+    pre_tax_cagr = ((final_equity / start_equity) ** (1.0 / years) - 1.0) * 100.0
+
+    # Nifty 50 Buy & Hold Return & CAGR
     nifty_start_close = nifty_dict[backtest_dates[0]]["Close"]
     nifty_end_close = nifty_dict[backtest_dates[-1]]["Close"]
     nifty_bh_return_pct = ((nifty_end_close - nifty_start_close) / nifty_start_close) * 100.0
+    nifty_bh_cagr = ((nifty_end_close - nifty_start_close) / nifty_start_close + 1.0) ** (1.0 / years) - 1.0
+    nifty_bh_cagr = nifty_bh_cagr * 100.0
 
     total_trades_count = len(df_trades)
     winning_trades = df_trades[df_trades["total_pnl"] > 0]
@@ -474,7 +537,18 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
 
     gross_profit = winning_trades["total_pnl"].sum()
     gross_loss = abs(losing_trades["total_pnl"].sum())
+    total_friction = df_trades["friction"].sum() if "friction" in df_trades.columns else 0.0
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (999.0 if gross_profit > 0 else 0.0)
+
+    # Net Taxable Gain & STCG Tax Calculation
+    # Net Taxable Gain = Gross Realized Profit - Gross Realized Loss (net profit after transaction friction)
+    net_taxable_gain = max(0.0, total_net_pnl)
+    stcg_tax_payable = STCG_TAX_RATE * net_taxable_gain
+
+    post_tax_final_equity = final_equity - stcg_tax_payable
+    post_tax_net_pnl = post_tax_final_equity - start_equity
+    post_tax_total_return_pct = (post_tax_net_pnl / start_equity) * 100.0
+    post_tax_cagr = ((post_tax_final_equity / start_equity) ** (1.0 / years) - 1.0) * 100.0
 
     # Max Drawdown Calculation
     df_equity["Peak"] = df_equity["TotalEquity"].cummax()
@@ -493,19 +567,29 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
     metrics = {
         "start_date": backtest_dates[0],
         "end_date": backtest_dates[-1],
+        "years": round(years, 2),
         "trading_sessions": len(backtest_dates),
         "initial_capital": start_equity,
         "final_equity": final_equity,
         "total_net_pnl": total_net_pnl,
         "strategy_return_pct": strategy_return_pct,
+        "pre_tax_cagr": pre_tax_cagr,
+        "post_tax_cagr": post_tax_cagr,
+        "stcg_tax_payable": stcg_tax_payable,
+        "post_tax_final_equity": post_tax_final_equity,
+        "post_tax_net_pnl": post_tax_net_pnl,
+        "post_tax_total_return_pct": post_tax_total_return_pct,
         "nifty_bh_return_pct": nifty_bh_return_pct,
-        "alpha_pct": strategy_return_pct - nifty_bh_return_pct,
+        "nifty_bh_cagr": nifty_bh_cagr,
+        "alpha_cagr": pre_tax_cagr - nifty_bh_cagr,
+        "post_tax_alpha_cagr": post_tax_cagr - nifty_bh_cagr,
         "total_trades": total_trades_count,
         "winning_trades": win_count,
         "losing_trades": loss_count,
         "win_rate_pct": win_rate_pct,
         "gross_profit": gross_profit,
         "gross_loss": gross_loss,
+        "total_friction": total_friction,
         "profit_factor": profit_factor,
         "max_drawdown_pct": max_drawdown_pct,
         "avg_win": avg_win,
@@ -518,8 +602,8 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
 
     # Format and save backtest results CSV
     export_cols = [
-        "id", "symbol", "entry_date", "entry_price", "qty", "cost",
-        "initial_stop_loss", "final_stop_loss", "highest_close", "max_r_reached",
+        "id", "symbol", "sector", "entry_date", "entry_price", "qty", "cost",
+        "trade_risk", "initial_stop_loss", "final_stop_loss", "highest_close", "max_r_reached",
         "stage", "exit_date", "exit_price", "gross_pnl", "friction", "total_pnl",
         "exit_reason", "relative_strength", "rsi"
     ]
@@ -536,36 +620,44 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
 
 def print_backtest_summary(m: Dict[str, Any]) -> None:
     """Print an executive performance summary table to the terminal."""
-    print("\n" + "=" * 82)
-    print("      2-STAGE DYNAMIC ATR TRAILING SWING STRATEGY: 3-YEAR PERFORMANCE")
-    print("=" * 82)
-    print(f"Backtest Period        : {m['start_date']}  to  {m['end_date']} ({m['trading_sessions']} sessions)")
+    print("\n" + "=" * 84)
+    print("      DYNAMIC COMPOUNDING & SECTOR-DIVERSIFIED SWING ENGINE: 3-YEAR REPORT")
+    print("=" * 84)
+    print(f"Backtest Period        : {m['start_date']}  to  {m['end_date']} ({m['trading_sessions']} sessions, {m['years']} yrs)")
     print(f"Screening Universe     : Nifty 200 Daily (Macro Trend + 20 EMA Pullback Confluence)")
-    print(f"Benchmark Regime Filter: Nifty 50 Close > 50-day EMA (Defensive Entry Halt)")
+    print(f"Sector Guard           : MAX 1 ACTIVE POSITION PER SECTOR (Ranked by 20d RS)")
+    print(f"Position Sizing Model  : DYNAMIC COMPOUNDING (1.0% Equity Risk / Trade | 20% Slot Cap)")
     print(f"Trailing Stop Engine   : Stage 1 (+1.5R Breakeven) -> Stage 2 (+2.5R Chandelier 2.5x ATR)")
-    print(f"Portfolio Sizing Model : 5 Concurrent Slots (Rs 40k/slot) | Rs 2,000 Risk/Trade (1.5x ATR)")
-    print("-" * 82)
-    print(f"Initial Starting Capital: Rs {m['initial_capital']:>14,.2f}")
-    print(f"Ending Portfolio Equity : Rs {m['final_equity']:>14,.2f}")
-    print(f"Total Strategy Net P&L  : Rs {m['total_net_pnl']:>+14,.2f}")
-    print(f"Strategy Total Return   :    {m['strategy_return_pct']:>13.2f} %")
-    print(f"Nifty 50 Buy & Hold Ret :    {m['nifty_bh_return_pct']:>13.2f} %")
-    print(f"Strategy Excess Alpha   :    {m['alpha_pct']:>+13.2f} %")
-    print("-" * 82)
-    print(f"Total Executed Trades   :    {m['total_trades']:>14d}")
-    print(f"Winning Trades          :    {m['winning_trades']:>14d} ({m['win_rate_pct']:.1f}%)")
-    print(f"Losing Trades           :    {m['losing_trades']:>14d} ({100 - m['win_rate_pct']:.1f}%)")
-    print(f"Profit Factor           :    {m['profit_factor']:>14.2f}")
-    print(f"Maximum Strategy DD (%) :    {m['max_drawdown_pct']:>13.2f} %")
-    print("-" * 82)
-    print(f"Gross Profits Realized  : Rs {m['gross_profit']:>14,.2f}")
-    print(f"Gross Losses Incurred   : Rs {m['gross_loss']:>14,.2f}")
-    print(f"Average Winning Trade   : Rs {m['avg_win']:>+14,.2f}")
-    print(f"Average Losing Trade    : Rs {m['avg_loss']:>+14,.2f}")
-    print(f"Expectancy per Trade    : Rs {m['avg_trade_pnl']:>+14,.2f}")
-    print("-" * 82)
-    print(f"Stage Breakdown (Exits) : Stage 0 (Initial SL): {m['stage_0_exits']} | Stage 1 (BE): {m['stage_1_exits']} | Stage 2 (Chandelier): {m['stage_2_exits']}")
-    print("=" * 82 + "\n")
+    print("-" * 84)
+    print("CAPITAL & RETURN SCORECARD:")
+    print(f"  Starting Capital             : Rs {m['initial_capital']:>15,.2f}")
+    print(f"  Final Pre-Tax Equity         : Rs {m['final_equity']:>15,.2f}")
+    print(f"  Pre-Tax Net Profit           : Rs {m['total_net_pnl']:>+15,.2f}")
+    print(f"  Pre-Tax Total Return         :     {m['strategy_return_pct']:>14.2f} %")
+    print(f"  Pre-Tax CAGR                 :     {m['pre_tax_cagr']:>14.2f} %")
+    print(f"  Nifty 50 Buy & Hold CAGR     :     {m['nifty_bh_cagr']:>14.2f} % (Total: {m['nifty_bh_return_pct']:.2f}%)")
+    print(f"  Pre-Tax Excess Alpha (CAGR)  :     {m['alpha_cagr']:>+14.2f} %")
+    print("-" * 84)
+    print("NET POST-TAX COMPOUNDING (20% STCG TAX & 0.15% FRICTION):")
+    print(f"  Total Turnover Friction (0.15%): Rs {m['total_friction']:>13,.2f}")
+    print(f"  STCG Tax Payable (20%)       : Rs {m['stcg_tax_payable']:>15,.2f}")
+    print(f"  TOTAL NET POST-TAX EQUITY    : Rs {m['post_tax_final_equity']:>15,.2f}")
+    print(f"  Post-Tax Net Profit          : Rs {m['post_tax_net_pnl']:>+15,.2f}")
+    print(f"  Post-Tax Total Return        :     {m['post_tax_total_return_pct']:>14.2f} %")
+    print(f"  POST-TAX CAGR                :     {m['post_tax_cagr']:>14.2f} %")
+    print(f"  Post-Tax Excess Alpha (CAGR) :     {m['post_tax_alpha_cagr']:>+14.2f} %")
+    print("-" * 84)
+    print("RISK & EXECUTION METRICS:")
+    print(f"  Total Trades Executed        :     {m['total_trades']:>14d}")
+    print(f"  Winning Trades               :     {m['winning_trades']:>14d} ({m['win_rate_pct']:.1f}%)")
+    print(f"  Losing Trades                :     {m['losing_trades']:>14d} ({100 - m['win_rate_pct']:.1f}%)")
+    print(f"  Profit Factor                :     {m['profit_factor']:>14.2f}")
+    print(f"  MAXIMUM STRATEGY DRAWDOWN (%):     {m['max_drawdown_pct']:>14.2f} %")
+    print(f"  Average Winning Trade        : Rs {m['avg_win']:>+15,.2f}")
+    print(f"  Average Losing Trade         : Rs {m['avg_loss']:>+15,.2f}")
+    print(f"  Trade Expectancy             : Rs {m['avg_trade_pnl']:>+15,.2f}")
+    print(f"  Exit Stages Breakdown        : Initial SL: {m['stage_0_exits']} | Breakeven: {m['stage_1_exits']} | Chandelier Trail: {m['stage_2_exits']}")
+    print("=" * 84 + "\n")
 
 
 if __name__ == "__main__":
