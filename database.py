@@ -10,54 +10,42 @@ def get_connection(db_path: str = DB_NAME) -> sqlite3.Connection:
     return conn
 
 def migrate_db(db_path: str = DB_NAME) -> None:
-    """Migrate trades table if old schema or missing columns are detected."""
+    """Ensure trades table schema supports dynamic ATR Chandelier trailing and stages."""
     with get_connection(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='trades'")
         row = cursor.fetchone()
         if row:
-            sql = row[0]
-            if "OPEN_RUNNER" not in sql or "remaining_qty" not in sql:
-                cursor.execute("ALTER TABLE trades RENAME TO trades_old")
-                cursor.execute("""
-                    CREATE TABLE trades (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        symbol TEXT NOT NULL,
-                        entry_date TEXT NOT NULL,
-                        entry_price REAL NOT NULL,
-                        qty INTEGER NOT NULL,
-                        stop_loss REAL NOT NULL,
-                        target REAL NOT NULL,
-                        exit_date TEXT,
-                        exit_price REAL,
-                        pnl REAL,
-                        status TEXT NOT NULL CHECK (status IN ('OPEN', 'OPEN_RUNNER', 'CLOSED_TARGET', 'CLOSED_SL', 'CLOSED_TRAIL')),
-                        initial_qty INTEGER DEFAULT 0,
-                        remaining_qty INTEGER DEFAULT 0,
-                        target_1 REAL DEFAULT 0.0,
-                        target_1_hit INTEGER DEFAULT 0,
-                        t1_exit_date TEXT,
-                        t1_exit_price REAL,
-                        t1_pnl REAL DEFAULT 0.0
-                    )
-                """)
-                cursor.execute("""
-                    INSERT INTO trades (
-                        id, symbol, entry_date, entry_price, qty, stop_loss, target,
-                        exit_date, exit_price, pnl, status, initial_qty, remaining_qty,
-                        target_1, target_1_hit, t1_exit_date, t1_exit_price, t1_pnl
-                    )
-                    SELECT 
-                        id, symbol, entry_date, entry_price, qty, stop_loss, target,
-                        exit_date, exit_price, pnl, status,
-                        qty, qty, target, 0, NULL, NULL, 0.0
-                    FROM trades_old
-                """)
-                cursor.execute("DROP TABLE trades_old")
-                conn.commit()
+            cursor.execute("PRAGMA table_info(trades)")
+            columns = [c[1] for c in cursor.fetchall()]
+
+            # Add missing columns if needed
+            new_columns = {
+                "highest_close": "REAL DEFAULT 0.0",
+                "max_r_reached": "REAL DEFAULT 0.0",
+                "stage": "INTEGER DEFAULT 0",
+                "per_share_risk": "REAL DEFAULT 0.0",
+                "exit_reason": "TEXT DEFAULT ''",
+            }
+            for col_name, col_type in new_columns.items():
+                if col_name not in columns:
+                    cursor.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+
+            # Backfill initial values for existing open trades if needed
+            cursor.execute("""
+                UPDATE trades
+                SET highest_close = entry_price
+                WHERE highest_close IS NULL OR highest_close = 0.0
+            """)
+            cursor.execute("""
+                UPDATE trades
+                SET per_share_risk = ROUND(entry_price - stop_loss, 2)
+                WHERE per_share_risk IS NULL OR per_share_risk = 0.0
+            """)
+            conn.commit()
 
 def init_db(db_path: str = DB_NAME) -> None:
-    """Initialize SQLite database tables, run schema migrations, and setup account state."""
+    """Initialize SQLite database tables and ensure all columns exist."""
     with get_connection(db_path) as conn:
         cursor = conn.cursor()
         
@@ -71,7 +59,7 @@ def init_db(db_path: str = DB_NAME) -> None:
             )
         """)
         
-        # Trades table with partial exit and trailing support
+        # Trades table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,18 +68,23 @@ def init_db(db_path: str = DB_NAME) -> None:
                 entry_price REAL NOT NULL,
                 qty INTEGER NOT NULL,
                 stop_loss REAL NOT NULL,
-                target REAL NOT NULL,
+                target REAL DEFAULT 0.0,
                 exit_date TEXT,
                 exit_price REAL,
                 pnl REAL,
-                status TEXT NOT NULL CHECK (status IN ('OPEN', 'OPEN_RUNNER', 'CLOSED_TARGET', 'CLOSED_SL', 'CLOSED_TRAIL')),
+                status TEXT NOT NULL,
                 initial_qty INTEGER DEFAULT 0,
                 remaining_qty INTEGER DEFAULT 0,
                 target_1 REAL DEFAULT 0.0,
                 target_1_hit INTEGER DEFAULT 0,
                 t1_exit_date TEXT,
                 t1_exit_price REAL,
-                t1_pnl REAL DEFAULT 0.0
+                t1_pnl REAL DEFAULT 0.0,
+                highest_close REAL DEFAULT 0.0,
+                max_r_reached REAL DEFAULT 0.0,
+                stage INTEGER DEFAULT 0,
+                per_share_risk REAL DEFAULT 0.0,
+                exit_reason TEXT DEFAULT ''
             )
         """)
         
@@ -104,7 +97,6 @@ def init_db(db_path: str = DB_NAME) -> None:
             """)
         conn.commit()
 
-    # Ensure any existing older schema is upgraded smoothly
     migrate_db(db_path)
 
 def get_account(db_path: str = DB_NAME) -> Dict[str, float]:
@@ -133,15 +125,15 @@ def update_account(cash: float, realized_pnl: float, db_path: str = DB_NAME) -> 
         conn.commit()
 
 def get_open_trades(db_path: str = DB_NAME) -> List[Dict[str, Any]]:
-    """Retrieve all active trades (both full OPEN and OPEN_RUNNER trailing positions)."""
+    """Retrieve all trades that are currently OPEN."""
     with get_connection(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, symbol, entry_date, entry_price, qty, stop_loss, target,
                    exit_date, exit_price, pnl, status, initial_qty, remaining_qty,
-                   target_1, target_1_hit, t1_exit_date, t1_exit_price, t1_pnl
+                   highest_close, max_r_reached, stage, per_share_risk, exit_reason
             FROM trades
-            WHERE status IN ('OPEN', 'OPEN_RUNNER')
+            WHERE status LIKE 'OPEN%'
             ORDER BY entry_date ASC, id ASC
         """)
         rows = cursor.fetchall()
@@ -154,7 +146,7 @@ def get_all_trades(db_path: str = DB_NAME) -> List[Dict[str, Any]]:
         cursor.execute("""
             SELECT id, symbol, entry_date, entry_price, qty, stop_loss, target,
                    exit_date, exit_price, pnl, status, initial_qty, remaining_qty,
-                   target_1, target_1_hit, t1_exit_date, t1_exit_price, t1_pnl
+                   highest_close, max_r_reached, stage, per_share_risk, exit_reason
             FROM trades
             ORDER BY id DESC
         """)
@@ -167,7 +159,8 @@ def record_trade(
     entry_price: float,
     qty: int,
     stop_loss: float,
-    target_1: float,
+    per_share_risk: float,
+    target: float = 0.0,
     db_path: str = DB_NAME
 ) -> int:
     """Record a newly executed swing trade."""
@@ -176,43 +169,33 @@ def record_trade(
         cursor.execute("""
             INSERT INTO trades (
                 symbol, entry_date, entry_price, qty, stop_loss, target,
-                status, initial_qty, remaining_qty, target_1, target_1_hit, t1_pnl
+                status, initial_qty, remaining_qty, highest_close, max_r_reached,
+                stage, per_share_risk, exit_reason
             )
-            VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, 0, 0.0)
-        """, (symbol, entry_date, entry_price, qty, stop_loss, target_1, qty, qty, target_1))
+            VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, 0.0, 0, ?, '')
+        """, (symbol, entry_date, entry_price, qty, stop_loss, target, qty, qty, entry_price, per_share_risk))
         conn.commit()
         return cursor.lastrowid
 
-def record_partial_exit(
+def update_trade_trailing_stop(
     trade_id: int,
-    t1_exit_date: str,
-    t1_exit_price: float,
-    t1_pnl: float,
-    remaining_qty: int,
-    new_stop_loss: float,
+    stop_loss: float,
+    highest_close: float,
+    max_r_reached: float,
+    stage: int,
     db_path: str = DB_NAME
 ) -> None:
-    """
-    Record Target 1 partial exit (50% lock-in):
-    - Sets target_1_hit = 1
-    - Records t1_exit_date, t1_exit_price, t1_pnl
-    - Updates remaining_qty for runner
-    - Moves stop_loss to breakeven (entry_price)
-    - Changes status to 'OPEN_RUNNER'
-    """
+    """Update active position's trailing stop, peak close, max R, and stage."""
     with get_connection(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE trades
-            SET target_1_hit = 1,
-                t1_exit_date = ?,
-                t1_exit_price = ?,
-                t1_pnl = ?,
-                remaining_qty = ?,
-                stop_loss = ?,
-                status = 'OPEN_RUNNER'
+            SET stop_loss = ?,
+                highest_close = ?,
+                max_r_reached = ?,
+                stage = ?
             WHERE id = ?
-        """, (t1_exit_date, t1_exit_price, t1_pnl, remaining_qty, new_stop_loss, trade_id))
+        """, (stop_loss, highest_close, max_r_reached, stage, trade_id))
         conn.commit()
 
 def close_trade(
@@ -221,9 +204,10 @@ def close_trade(
     exit_price: float,
     pnl: float,
     status: str,
+    exit_reason: str = "",
     db_path: str = DB_NAME
 ) -> None:
-    """Finalize closure of a trade (Stop Loss or runner trailing stop)."""
+    """Close full position upon trailing stop breach."""
     with get_connection(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -232,15 +216,16 @@ def close_trade(
                 exit_price = ?,
                 pnl = ?,
                 remaining_qty = 0,
-                status = ?
+                status = ?,
+                exit_reason = ?
             WHERE id = ?
-        """, (exit_date, exit_price, pnl, status, trade_id))
+        """, (exit_date, exit_price, pnl, status, exit_reason, trade_id))
         conn.commit()
 
 if __name__ == "__main__":
     init_db()
     acc = get_account()
     open_trades = get_open_trades()
-    print("Database upgraded & initialized successfully.")
+    print("Database initialized & migrated successfully.")
     print("Account State:", acc)
-    print(f"Active Trades Count: {len(open_trades)}")
+    print(f"Open Positions: {len(open_trades)}")

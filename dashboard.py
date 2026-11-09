@@ -141,14 +141,14 @@ with st.sidebar:
     - **Universe**: Nifty 200 Daily
     - **Macro Trend**: Close > 200 EMA & 20 EMA > 50 EMA
     - **Pullback Dynamic**: Low &le; 20 EMA, Close > 20 EMA, Close &ge; Open
-    - **RSI Filter**: 45 to 60 (healthy consolidation)
-    - **Volume Expansion**: Vol &ge; 1.25x 20-day Volume SMA
-    - **Selection**: Ranked by 20-day Relative Strength vs Nifty 50
-    - **Max Slots**: 4 (₹50k max allocation per slot)
-    - **Risk per Trade**: ₹2,000 (1% of ₹200k)
-    - **Stop Loss**: 1.5x ATR below Entry
-    - **Target 1 (+2R)**: Exit 50% position
-    - **Runner Half**: Move SL to Breakeven, trail via daily close < 10 EMA
+    - **RSI Filter**: 40 to 65
+    - **Volume Filter**: Vol &ge; 0.85x 20-day Volume SMA
+    - **Selection**: Top 20-day Relative Strength vs Nifty 50
+    - **Max Slots**: 5 (₹40k max allocation per slot)
+    - **Risk per Trade**: ₹2,000 (1.5x ATR initial stop)
+    - **Stage 1 (Breakeven Lock)**: At +1.5R (+₹3k), stop moved to Entry Price
+    - **Stage 2 (Chandelier Trail)**: At +2.5R (+₹5k), stop = Highest Daily Close - (2.5 &times; ATR)
+    - **Exit**: 100% position closed on trailing stop touch
     - **Friction**: 0.15% per round-trip
     """)
     st.markdown("---")
@@ -157,8 +157,8 @@ with st.sidebar:
 # Fetch data from DB
 acc = get_account()
 all_trades = get_all_trades()
-open_trades = [t for t in all_trades if t["status"] in ("OPEN", "OPEN_RUNNER")]
-closed_trades = [t for t in all_trades if t["status"] in ("CLOSED_TARGET", "CLOSED_SL", "CLOSED_TRAIL")]
+open_trades = [t for t in all_trades if str(t["status"]).startswith("OPEN")]
+closed_trades = [t for t in all_trades if str(t["status"]).startswith("CLOSED")]
 
 # Fetch live prices for open positions
 open_symbols = [t["symbol"] for t in open_trades]
@@ -233,37 +233,39 @@ with m5:
 st.markdown("---")
 
 # Active Positions Section
-st.subheader(f"📌 Active Positions ({len(open_trades)} / 4 Slots)")
+st.subheader(f"📌 Active Positions ({len(open_trades)} / 5 Slots)")
 
 if open_trades:
     positions_data = []
     for t in open_trades:
         sym = t["symbol"]
-        qty = int(t["remaining_qty"] if t.get("remaining_qty") else t["qty"])
-        init_qty = int(t["initial_qty"] if t.get("initial_qty") else t["qty"])
+        qty = int(t.get("remaining_qty") or t["qty"])
         entry_p = float(t["entry_price"])
         curr_p = live_prices.get(sym, entry_p)
         pos_pnl = (curr_p - entry_p) * qty
         pos_pnl_pct = ((curr_p - entry_p) / entry_p) * 100
-        status = t["status"]
+        stage = int(t.get("stage") or 0)
+        highest_c = float(t.get("highest_close") or entry_p)
+        max_r = float(t.get("max_r_reached") or 0.0)
 
-        sl_text = f"₹{t['stop_loss']:,.2f}"
-        if status == "OPEN_RUNNER":
-            sl_text = f"₹{t['stop_loss']:,.2f} (Breakeven)"
-
-        status_display = "Active (50% Runner / Trail 10 EMA)" if status == "OPEN_RUNNER" else "Active (Pending T1)"
+        if stage == 0:
+            stage_str = "Stage 0 (Initial SL)"
+        elif stage == 1:
+            stage_str = "Stage 1 (Breakeven Lock)"
+        else:
+            stage_str = f"Stage 2 (Chandelier Trail - Peak ₹{highest_c:,.2f})"
 
         positions_data.append({
             "Trade ID": f"#{t['id']}",
             "Symbol": sym,
             "Entry Date": t["entry_date"],
             "Entry Price": f"₹{entry_p:,.2f}",
-            "Remaining Qty": f"{qty} (orig {init_qty})",
+            "Qty": qty,
             "Current Price": f"₹{curr_p:,.2f}",
-            "Current Stop-Loss": sl_text,
-            "Target 1 (+2R)": f"₹{(t['target_1'] if t.get('target_1') else t['target']):,.2f}",
+            "Trailing Stop": f"₹{t['stop_loss']:,.2f}",
+            "Max R": f"{max_r:+.2f}R",
             "Unrealized P&L": f"₹{pos_pnl:+,.2f} ({pos_pnl_pct:+.2f}%)",
-            "Status": status_display
+            "Trailing Stage": stage_str
         })
         
     df_positions = pd.DataFrame(positions_data)
@@ -282,15 +284,7 @@ if closed_trades:
         pnl = t["pnl"] if t["pnl"] is not None else 0.0
         exit_p = t["exit_price"] if t["exit_price"] is not None else 0.0
         exit_d = t["exit_date"] if t["exit_date"] is not None else "-"
-        status = t["status"]
-        
-        status_label = status
-        if status == "CLOSED_TRAIL":
-            status_label = "Closed (Runner Trail / 10 EMA)"
-        elif status == "CLOSED_TARGET":
-            status_label = "Closed (Target 1 Hit)"
-        elif status == "CLOSED_SL":
-            status_label = "Closed (Stop Loss Hit)"
+        reason = t.get("exit_reason") or t["status"]
 
         history_data.append({
             "Trade ID": f"#{t['id']}",
@@ -301,10 +295,10 @@ if closed_trades:
             "Exit Date": exit_d,
             "Exit Price": f"₹{exit_p:,.2f}",
             "Net P&L": f"₹{pnl:+,.2f}",
-            "Exit Status": status_label
+            "Exit Reason": reason
         })
         
     df_history = pd.DataFrame(history_data)
     st.dataframe(df_history, use_container_width=True, hide_index=True)
 else:
-    st.info("No closed trades recorded yet. Completed trades (Target 1, Stop Loss, or Runner Trail) will be displayed here.")
+    st.info("No closed trades recorded yet. Completed trades will be displayed here.")
