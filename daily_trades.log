@@ -1,0 +1,88 @@
+======================================================== 
+[START] Execution started on: 09-11-2026 16:45:41.01 
+======================================================== 
+[INIT] Monitoring open trades for exit conditions...
+[INIT] Scanning Nifty 50 stocks for potential setups...
+
+[SCAN] Fetching data for 50 tickers (Open slots: 3/4)...
+
+===========================================================================
+           AUTOMATED SWING PAPER TRADING BOT SUMMARY
+===========================================================================
+Timestamp: 2026-11-09 16:45:46
+Tickers Evaluated: 50
+Signals Identified: 1
+
+--- Signals Qualifying Today ---
+  * HCLTECH.NS      | Close: Rs 1407.0   | 20 EMA: Rs 1385.03  | RSI: 58.43 | SL: Rs 1346.5   | Target: Rs 1528.0  
+
+--- Trades Monitored & Closed ---
+  None (No exit triggers hit for active positions)
+
+--- Trades Executed Today ---
+  None (Either no new signals, slots full, or insufficient cash)
+
+--- Current Open Positions (1/4) ---
+  * #1 HCLTECH.NS      Qty: 33   Entry: Rs 1407.0   SL: Rs 1346.5   Target: Rs 1528.0   Date: 2026-11-09
+
+--- Account Overview ---
+  Initial Capital : Rs 200,000.00
+  Available Cash  : Rs 153,569.00
+  Realized PnL    : Rs 0.00
+  Open Positions  : Rs 46,431.00 (at entry cost)
+  Estimated Equity: Rs 200,000.00
+===========================================================================
+
+[END] Execution completed on: 09-11-2026 16:45:46.15 
+======================================================== 
+ 
+======================================================== 
+[START] Execution started on: 09-11-2026 16:52:09.83 
+======================================================== 
+[INIT] Monitoring open trades for exit conditions...
+[INIT] Scanning Nifty 200 stocks for potential setups...
+
+[SCAN] Batch downloading 1-year data for 200 Nifty 200 tickers...
+[SCAN] Open slots available: 0/4
+
+==============================================================================
+           AUTOMATED SWING PAPER TRADING BOT SUMMARY (NIFTY 200)
+==============================================================================
+Timestamp: 2026-11-09 16:52:17
+Universe Size: 200 | Evaluated (>=200 bars): 199
+Signals Identified: 9
+
+--- Signals Qualifying Today ---
+  * APLAPOLLO.NS     | Close: Rs 2181.3   | 20 EMA: Rs 2158.73  | RSI: 53.51 | SL: Rs 2092.87  | Target: Rs 2358.16 
+  * BHEL.NS          | Close: Rs 422.95   | 20 EMA: Rs 414.08   | RSI: 53.34 | SL: Rs 392.1    | Target: Rs 484.65  
+  * FEDERALBNK.NS    | Close: Rs 344.1    | 20 EMA: Rs 338.66   | RSI: 56.06 | SL: Rs 329.5    | Target: Rs 373.3   
+  * HCLTECH.NS       | Close: Rs 1407.0   | 20 EMA: Rs 1385.03  | RSI: 58.43 | SL: Rs 1346.5   | Target: Rs 1528.0  
+  * HAL.NS           | Close: Rs 4999.0   | 20 EMA: Rs 4901.7   | RSI: 57.71 | SL: Rs 4805.23  | Target: Rs 5386.54 
+  * MPHASIS.NS       | Close: Rs 2455.0   | 20 EMA: Rs 2482.58  | RSI: 49.13 | SL: Rs 2313.25  | Target: Rs 2738.5  
+  * PERSISTENT.NS    | Close: Rs 6040.0   | 20 EMA: Rs 5896.44  | RSI: 61.71 | SL: Rs 5778.44  | Target: Rs 6563.12 
+  * MOTHERSON.NS     | Close: Rs 161.91   | 20 EMA: Rs 159.52   | RSI: 53.07 | SL: Rs 152.56   | Target: Rs 180.61  
+  * TORNTPHARM.NS    | Close: Rs 4780.0   | 20 EMA: Rs 4674.27  | RSI: 57.96 | SL: Rs 4576.3   | Target: Rs 5187.4  
+
+--- Trades Monitored & Closed ---
+  None (No exit triggers hit for active positions)
+
+--- Trades Executed Today ---
+  None (Either no new signals, slots full, or insufficient cash)
+
+--- Current Open Positions (4/4) ---
+  * #1 HCLTECH.NS       Qty: 33   Entry: Rs 1407.0   SL: Rs 1346.5   Target: Rs 1528.0   Date: 2026-11-09
+  * #2 APLAPOLLO.NS     Qty: 22   Entry: Rs 2181.3   SL: Rs 2092.87  Target: Rs 2358.16  Date: 2026-11-09
+  * #3 BHEL.NS          Qty: 64   Entry: Rs 422.95   SL: Rs 392.1    Target: Rs 484.65   Date: 2026-11-09
+  * #4 FEDERALBNK.NS    Qty: 136  Entry: Rs 344.1    SL: Rs 329.5    Target: Rs 373.3    Date: 2026-11-09
+
+--- Account Overview ---
+  Initial Capital : Rs 200,000.00
+  Available Cash  : Rs 31,714.00
+  Realized PnL    : Rs 0.00
+  Open Positions  : Rs 168,286.00 (at entry cost)
+  Estimated Equity: Rs 200,000.00
+==============================================================================
+
+[END] Execution completed on: 09-11-2026 16:52:17.36 
+======================================================== 
+ 
