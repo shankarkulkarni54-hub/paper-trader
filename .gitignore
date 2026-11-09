@@ -8,6 +8,7 @@ ENV/
 env/
 
 # Python bytecode & cache
+.cache/
 __pycache__/
 *.py[cod]
 *$py.class
