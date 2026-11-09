@@ -10,11 +10,11 @@ import ta
 
 from bot import load_nifty200_universe
 
-# Production Configuration (5-slot ATR Chandelier Strategy)
+# Backtest Configuration (Dynamic Compounding & Responsive Regime Engine)
 INITIAL_CAPITAL = 200000.0
 MAX_CONCURRENT_POSITIONS = 5                     # 5 concurrent slots
-MAX_CAPITAL_PER_SLOT = INITIAL_CAPITAL / MAX_CONCURRENT_POSITIONS  # Rs 40,000 per slot
-RISK_PER_TRADE = 2000.0                          # Rs 2,000 initial risk (1.5x ATR stop)
+RISK_PCT_PER_TRADE = 0.01                        # 1.0% dynamic risk of current portfolio equity
+MAX_SLOT_PCT = 0.20                              # Max 20% capital deployed per slot
 FRICTION_RATE = 0.0015                           # 0.15% round-trip friction / brokerage
 
 DATA_START = "2015-01-01"                        # Historical data start for 10Y+ indicator warmup
@@ -255,8 +255,8 @@ def simulate_period(
                 if current_r > pos["max_r_reached"]:
                     pos["max_r_reached"] = round(current_r, 2)
 
-                # Stage 2: When unrealized gain reaches +2.5R (+Rs 5,000)
-                if current_r >= 2.5 or (unrealized_peak_gain * qty) >= 5000.0:
+                # Stage 2: When unrealized gain reaches +2.5R (+2.5 * trade_risk)
+                if current_r >= 2.5 or (unrealized_peak_gain * qty) >= (2.5 * trade_risk):
                     pos["stage"] = 2
                     chandelier_stop = round(pos["highest_close"] - (2.5 * atr), 2)
                     if chandelier_stop > pos["stop_loss"]:
@@ -264,8 +264,8 @@ def simulate_period(
                     if pos["stop_loss"] < entry_price:
                         pos["stop_loss"] = entry_price
 
-                # Stage 1: When unrealized gain reaches +1.5R (+Rs 3,000)
-                elif current_r >= 1.5 or (unrealized_peak_gain * qty) >= 3000.0:
+                # Stage 1: When unrealized gain reaches +1.5R (+1.5 * trade_risk)
+                elif current_r >= 1.5 or (unrealized_peak_gain * qty) >= (1.5 * trade_risk):
                     if pos["stage"] < 1:
                         pos["stage"] = 1
                     if entry_price > pos["stop_loss"]:
@@ -353,10 +353,16 @@ def simulate_period(
                 if per_share_risk <= 0.05:
                     continue
 
-                # Position sizing matching live bot.py:
-                # floor(2000 / per_share_risk), bounded by min(cash, 40000)
-                raw_qty = int(math.floor(RISK_PER_TRADE / per_share_risk))
-                max_qty_by_slot = int(math.floor(min(cash, MAX_CAPITAL_PER_SLOT) / entry_price))
+                # Dynamic Position Compounding: 1.0% equity risk
+                current_risk = current_portfolio_equity * RISK_PCT_PER_TRADE
+                current_risk = max(1000.0, current_risk)  # Prudent floor
+
+                # Position sizing: floor(current_risk / (1.5 * ATR))
+                raw_qty = int(math.floor(current_risk / per_share_risk))
+
+                # Slot Capital Ceiling: Max 20% of current portfolio equity, bounded by available cash
+                max_slot_capital = current_portfolio_equity * MAX_SLOT_PCT
+                max_qty_by_slot = int(math.floor(min(cash, max_slot_capital) / entry_price))
                 qty = min(raw_qty, max_qty_by_slot)
 
                 if qty >= 1:
@@ -549,6 +555,7 @@ def run_all_horizons():
     # 2. Precompute indicators
     print("\n[PRECOMPUTE] Calculating technical indicators across all symbols...")
     nifty_df = raw_data["^NSEI"].copy()
+    nifty_df["EMA_20"] = ta.trend.EMAIndicator(close=nifty_df["Close"], window=20).ema_indicator()
     nifty_df["EMA_50"] = ta.trend.EMAIndicator(close=nifty_df["Close"], window=50).ema_indicator()
     nifty_df["Ret_20"] = (nifty_df["Close"] - nifty_df["Close"].shift(20)) / nifty_df["Close"].shift(20)
     nifty_df["DateStr"] = nifty_df["Date"].dt.strftime("%Y-%m-%d")
@@ -557,13 +564,18 @@ def run_all_horizons():
     for _, row in nifty_df.iterrows():
         d_str = row["DateStr"]
         c = float(row["Close"])
+        e20 = float(row["EMA_20"]) if pd.notna(row["EMA_20"]) else 0.0
         e50 = float(row["EMA_50"]) if pd.notna(row["EMA_50"]) else 0.0
         r20 = float(row["Ret_20"]) if pd.notna(row["Ret_20"]) else 0.0
+        # Responsive Regime Filter: Allow new entries if Close > 20 EMA OR Close > 50 EMA.
+        # Halts entries only when Close is strictly below BOTH 20 EMA and 50 EMA.
+        is_bullish = (c > e20) or (c > e50)
         nifty_dict[d_str] = {
             "Close": c,
+            "EMA_20": e20,
             "EMA_50": e50,
             "Ret_20": r20,
-            "is_bullish": (c > e50) if e50 > 0 else True,
+            "is_bullish": is_bullish,
         }
 
     all_nifty_dates = sorted(list(nifty_dict.keys()))
