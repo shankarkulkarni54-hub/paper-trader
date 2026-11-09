@@ -10,12 +10,12 @@ import ta
 
 from bot import load_nifty200_universe
 
-# Backtest Configuration
+# Backtest Configuration (2-Stage Dynamic ATR Trailing Engine)
 INITIAL_CAPITAL = 200000.0
-MAX_CONCURRENT_POSITIONS = 4
-MAX_SLOT_CAPITAL = INITIAL_CAPITAL / MAX_CONCURRENT_POSITIONS  # Rs 50,000 per slot
-RISK_PER_TRADE = 2000.0                                       # Rs 2,000 (1% of starting capital)
-FRICTION_RATE = 0.0015                                        # 0.15% round-trip brokerage & friction
+MAX_CONCURRENT_POSITIONS = 5                                    # 5 concurrent slots
+MAX_SLOT_CAPITAL = INITIAL_CAPITAL / MAX_CONCURRENT_POSITIONS  # Rs 40,000 max allocation per slot
+RISK_PER_TRADE = 2000.0                                        # Rs 2,000 (1% of starting capital)
+FRICTION_RATE = 0.0015                                         # 0.15% round-trip brokerage & friction
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 RESULTS_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_results.csv")
@@ -95,7 +95,7 @@ def load_or_fetch_all_data(symbols: List[str], period: str = "4y") -> Dict[str, 
                             # Save to cache
                             df_sym.to_csv(get_cache_path(sym), index=False)
                             loaded_data[sym] = df_sym
-                    except Exception as e:
+                    except Exception:
                         pass
             else:
                 if len(missing_symbols) == 1:
@@ -136,7 +136,7 @@ def precalculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
-    """Execute the full 3-year backtest simulation."""
+    """Execute the full 3-year backtest simulation with 2-Stage Dynamic ATR Trailing Stops."""
     universe = load_nifty200_universe()
     all_symbols = ["^NSEI"] + universe
 
@@ -203,9 +203,10 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
     # Filter dates that fall within the last 3 years
     backtest_dates = [d for d in all_nifty_dates if d >= start_date_str]
 
-    print(f"\n[SIMULATION] Starting 3-year backtest:")
+    print(f"\n[SIMULATION] Starting 3-year backtest (2-Stage Dynamic ATR Trailing Stops):")
     print(f"             Window: {backtest_dates[0]} to {backtest_dates[-1]} ({len(backtest_dates)} trading sessions)")
-    print(f"             Initial Capital: Rs {INITIAL_CAPITAL:,.2f} | Max Slots: {MAX_CONCURRENT_POSITIONS}")
+    print(f"             Initial Capital: Rs {INITIAL_CAPITAL:,.2f} | Max Slots: {MAX_CONCURRENT_POSITIONS} (Rs {MAX_SLOT_CAPITAL:,.2f}/slot)")
+    print(f"             Risk per Trade : Rs {RISK_PER_TRADE:,.2f} | Dynamic Trailing: Stage 1 (+1.5R BE) -> Stage 2 (+2.5R Chandelier)")
 
     # Simulation State
     cash = INITIAL_CAPITAL
@@ -216,7 +217,7 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
 
     for d in backtest_dates:
         # -------------------------------------------------------------
-        # Step 1: Manage Existing Open Positions (Hybrid Exits)
+        # Step 1: Manage Existing Open Positions (2-Stage Dynamic Trailing Stop)
         # -------------------------------------------------------------
         still_open = []
         for pos in open_positions:
@@ -226,113 +227,79 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
                 still_open.append(pos)
                 continue
 
+            open_p = bar["Open"]
             high = bar["High"]
             low = bar["Low"]
             close = bar["Close"]
-            ema_10 = bar["EMA_10"]
+            atr = bar["ATR_14"]
             entry_price = pos["entry_price"]
+            qty = pos["qty"]
+            per_share_risk = pos["per_share_risk"]
 
-            # Phase A: Initial Position (Waiting for Target 1 or SL)
-            if pos["status"] == "OPEN":
-                # Check Initial Stop Loss (-1.5x ATR)
-                if low <= pos["stop_loss"]:
-                    exit_price = pos["stop_loss"]
-                    qty = pos["remaining_qty"]
-                    gross = (exit_price - entry_price) * qty
-                    turnover = (entry_price + exit_price) * qty
-                    friction = round(FRICTION_RATE * turnover, 2)
-                    net_pnl = round(gross - friction, 2)
-                    cash += round((exit_price * qty) - friction, 2)
+            # Check if current stop-loss is breached today
+            if low <= pos["stop_loss"]:
+                # Full position exit at current stop-loss (or gap open if lower)
+                exit_price = pos["stop_loss"]
+                if open_p < pos["stop_loss"]:
+                    exit_price = min(open_p, pos["stop_loss"])
 
-                    pos["exit_date"] = d
-                    pos["exit_price"] = exit_price
-                    pos["status"] = "CLOSED_SL"
-                    pos["total_pnl"] = net_pnl
-                    pos["exit_reason"] = "Stop Loss (-1.5x ATR)"
-                    pos["remaining_qty"] = 0
-                    closed_trades.append(pos)
+                gross = (exit_price - entry_price) * qty
+                turnover = (entry_price + exit_price) * qty
+                friction = round(FRICTION_RATE * turnover, 2)
+                net_pnl = round(gross - friction, 2)
+                cash += round((exit_price * qty) - friction, 2)
 
-                # Check Target 1 (+2R)
-                elif high >= pos["target_1"]:
-                    exit_price = pos["target_1"]
-                    qty_exit = max(1, pos["remaining_qty"] // 2) if pos["remaining_qty"] > 1 else 1
-                    qty_runner = pos["remaining_qty"] - qty_exit
+                pos["exit_date"] = d
+                pos["exit_price"] = round(exit_price, 2)
+                pos["gross_pnl"] = round(gross, 2)
+                pos["friction"] = friction
+                pos["total_pnl"] = net_pnl
+                pos["final_stop_loss"] = round(pos["stop_loss"], 2)
 
-                    gross = (exit_price - entry_price) * qty_exit
-                    turnover = (entry_price + exit_price) * qty_exit
-                    friction = round(FRICTION_RATE * turnover, 2)
-                    t1_pnl = round(gross - friction, 2)
-                    cash += round((exit_price * qty_exit) - friction, 2)
-
-                    pos["t1_exit_date"] = d
-                    pos["t1_exit_price"] = exit_price
-                    pos["t1_qty"] = qty_exit
-                    pos["t1_pnl"] = t1_pnl
-
-                    if qty_runner > 0:
-                        pos["remaining_qty"] = qty_runner
-                        pos["stop_loss"] = entry_price  # Move Stop to Breakeven
-                        pos["status"] = "OPEN_RUNNER"
-                        still_open.append(pos)
-                    else:
-                        pos["exit_date"] = d
-                        pos["exit_price"] = exit_price
-                        pos["status"] = "CLOSED_TARGET"
-                        pos["total_pnl"] = t1_pnl
-                        pos["exit_reason"] = "Target 1 Hit (Full Exit)"
-                        pos["remaining_qty"] = 0
-                        closed_trades.append(pos)
+                if pos["stage"] == 2:
+                    pos["exit_reason"] = f"Chandelier Trail Exit (Peak Close Rs {pos['highest_close']:.2f} - 2.5x ATR)"
+                elif pos["stage"] == 1:
+                    pos["exit_reason"] = "Breakeven Stop (Locked +1.5R)"
                 else:
-                    still_open.append(pos)
+                    pos["exit_reason"] = "Initial Stop-Loss (-1.5x ATR)"
 
-            # Phase B: Runner Active (50% remaining, Stop at Breakeven, trailing 10 EMA)
-            elif pos["status"] == "OPEN_RUNNER":
-                rem_qty = pos["remaining_qty"]
-                breakeven_sl = pos["stop_loss"]  # Already set to entry_price
+                pos["status"] = "CLOSED"
+                closed_trades.append(pos)
 
-                # Check Breakeven Stop
-                if low <= breakeven_sl:
-                    exit_price = breakeven_sl
-                    gross = (exit_price - entry_price) * rem_qty  # 0
-                    turnover = (entry_price + exit_price) * rem_qty
-                    friction = round(FRICTION_RATE * turnover, 2)
-                    runner_pnl = round(gross - friction, 2)
-                    cash += round((exit_price * rem_qty) - friction, 2)
+            else:
+                # Position not stopped out. Update highest close & evaluate ratcheting stops
+                if close > pos["highest_close"]:
+                    pos["highest_close"] = close
 
-                    pos["runner_exit_date"] = d
-                    pos["runner_exit_price"] = exit_price
-                    pos["runner_qty"] = rem_qty
-                    pos["runner_pnl"] = runner_pnl
-                    pos["exit_date"] = d
-                    pos["exit_price"] = exit_price
-                    pos["status"] = "CLOSED_TRAIL"
-                    pos["total_pnl"] = round(pos["t1_pnl"] + runner_pnl, 2)
-                    pos["exit_reason"] = "Runner Breakeven Stop"
-                    pos["remaining_qty"] = 0
-                    closed_trades.append(pos)
+                # Track peak unrealized R achieved
+                unrealized_peak_gain = high - entry_price
+                current_r = unrealized_peak_gain / per_share_risk
+                if current_r > pos["max_r_reached"]:
+                    pos["max_r_reached"] = round(current_r, 2)
 
-                # Check Trailing Exit (Close < 10-day EMA)
-                elif close < ema_10:
-                    exit_price = close
-                    gross = (exit_price - entry_price) * rem_qty
-                    turnover = (entry_price + exit_price) * rem_qty
-                    friction = round(FRICTION_RATE * turnover, 2)
-                    runner_pnl = round(gross - friction, 2)
-                    cash += round((exit_price * rem_qty) - friction, 2)
+                # Stage 2: When unrealized profit crosses +2.5R (+Rs 5,000)
+                # Activate Chandelier Trailing Stop = Highest Daily Close - (2.5 * ATR)
+                if current_r >= 2.5 or (unrealized_peak_gain * qty) >= 5000.0:
+                    pos["stage"] = 2
+                    chandelier_stop = round(pos["highest_close"] - (2.5 * atr), 2)
 
-                    pos["runner_exit_date"] = d
-                    pos["runner_exit_price"] = exit_price
-                    pos["runner_qty"] = rem_qty
-                    pos["runner_pnl"] = runner_pnl
-                    pos["exit_date"] = d
-                    pos["exit_price"] = exit_price
-                    pos["status"] = "CLOSED_TRAIL"
-                    pos["total_pnl"] = round(pos["t1_pnl"] + runner_pnl, 2)
-                    pos["exit_reason"] = "Runner Trail Exit (Close < 10 EMA)"
-                    pos["remaining_qty"] = 0
-                    closed_trades.append(pos)
-                else:
-                    still_open.append(pos)
+                    # Stop-loss can only ratchet upward, never downward
+                    if chandelier_stop > pos["stop_loss"]:
+                        pos["stop_loss"] = chandelier_stop
+
+                    # Guard: In Stage 2, stop must at least be Breakeven
+                    if pos["stop_loss"] < entry_price:
+                        pos["stop_loss"] = entry_price
+
+                # Stage 1: When unrealized profit reaches +1.5R (+Rs 3,000)
+                # Move Stop-Loss to Entry Price (Breakeven)
+                elif current_r >= 1.5 or (unrealized_peak_gain * qty) >= 3000.0:
+                    if pos["stage"] < 1:
+                        pos["stage"] = 1
+                    if entry_price > pos["stop_loss"]:
+                        pos["stop_loss"] = entry_price
+
+                still_open.append(pos)
 
         open_positions = still_open
 
@@ -358,7 +325,6 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
 
                 c = bar["Close"]
                 o = bar["Open"]
-                h = bar["High"]
                 l = bar["Low"]
                 v = bar["Volume"]
                 e20 = bar["EMA_20"]
@@ -368,23 +334,23 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
                 atr = bar["ATR_14"]
                 vol_sma = bar["VOL_SMA_20"]
 
-                # Confluence Setup Rules:
+                # Updated Confluence Setup Rules:
                 # 1. Macro Trend: Close > 200 EMA and 20 EMA > 50 EMA
                 # 2. Pullback Dynamic: Low <= 20 EMA, Close > 20 EMA, Close >= Open
-                # 3. RSI Filter: 45 <= RSI <= 60
-                # 4. Volume Filter: Volume >= 1.25 * 20-day Volume SMA
+                # 3. RSI Filter: 40.0 <= RSI <= 65.0
+                # 4. Volume Filter: Volume >= 0.85 * 20-day Volume SMA
                 if (
                     (c > e200) and (e20 > e50) and
                     (l <= e20) and (c > e20) and (c >= o) and
-                    (45.0 <= rsi <= 60.0) and
-                    (vol_sma > 0 and v >= 1.25 * vol_sma) and
+                    (40.0 <= rsi <= 65.0) and
+                    (vol_sma > 0 and v >= 0.85 * vol_sma) and
                     (atr > 0.05)
                 ):
                     rs = (bar["Ret_20"] - nifty_ret20) * 100.0
                     candidates.append({
                         "symbol": sym,
                         "bar": bar,
-                        "relative_strength": rs
+                        "relative_strength": rs,
                     })
 
             # Rank candidates by 20-day Relative Strength descending
@@ -403,12 +369,11 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
                 if per_share_risk <= 0.05:
                     continue
 
-                stop_loss = round(entry_price - per_share_risk, 2)
-                target_1 = round(entry_price + (2.0 * per_share_risk), 2)
+                initial_stop_loss = round(entry_price - per_share_risk, 2)
 
-                # Volatility-adjusted risk sizing: floor(2000 / Per-Share Risk)
+                # Position sizing: floor(2000 / Per-Share Risk)
                 raw_qty = int(math.floor(RISK_PER_TRADE / per_share_risk))
-                # Capital slot limit: Rs 50,000 max per slot, bounded by available cash
+                # Capital slot limit: Rs 40,000 max per slot, bounded by available cash
                 max_qty_by_slot = int(math.floor(min(cash, MAX_SLOT_CAPITAL) / entry_price))
                 qty = min(raw_qty, max_qty_by_slot)
 
@@ -422,25 +387,22 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
                         "symbol": sym,
                         "entry_date": d,
                         "entry_price": entry_price,
-                        "initial_qty": qty,
-                        "remaining_qty": qty,
-                        "stop_loss": stop_loss,
-                        "target_1": target_1,
+                        "qty": qty,
+                        "cost": total_cost,
                         "per_share_risk": per_share_risk,
                         "atr": atr,
-                        "cost": total_cost,
+                        "initial_stop_loss": initial_stop_loss,
+                        "stop_loss": initial_stop_loss,
+                        "highest_close": entry_price,
+                        "max_r_reached": 0.0,
+                        "stage": 0,
                         "status": "OPEN",
-                        "t1_exit_date": None,
-                        "t1_exit_price": None,
-                        "t1_qty": 0,
-                        "t1_pnl": 0.0,
-                        "runner_exit_date": None,
-                        "runner_exit_price": None,
-                        "runner_qty": 0,
-                        "runner_pnl": 0.0,
                         "exit_date": None,
                         "exit_price": None,
+                        "gross_pnl": 0.0,
+                        "friction": 0.0,
                         "total_pnl": 0.0,
+                        "final_stop_loss": initial_stop_loss,
                         "exit_reason": "",
                         "relative_strength": round(cand["relative_strength"], 2),
                         "rsi": round(bar["RSI_14"], 2),
@@ -456,7 +418,7 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
             sym = p["symbol"]
             curr_bar = stock_lookups.get(sym, {}).get(d)
             curr_close = curr_bar["Close"] if curr_bar else p["entry_price"]
-            open_val += curr_close * p["remaining_qty"]
+            open_val += curr_close * p["qty"]
 
         daily_equity = cash + open_val
         equity_curve.append({
@@ -467,21 +429,23 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
             "ActiveTrades": len(open_positions),
         })
 
-    # Close any still-open positions at the end of the simulation for accurate accounting
+    # Close any positions remaining open on the final date
     final_date = backtest_dates[-1]
     for p in open_positions:
         sym = p["symbol"]
         curr_bar = stock_lookups.get(sym, {}).get(final_date)
         final_close = curr_bar["Close"] if curr_bar else p["entry_price"]
-        rem_qty = p["remaining_qty"]
-        gross = (final_close - p["entry_price"]) * rem_qty
-        turnover = (p["entry_price"] + final_close) * rem_qty
+        gross = (final_close - p["entry_price"]) * p["qty"]
+        turnover = (p["entry_price"] + final_close) * p["qty"]
         friction = round(FRICTION_RATE * turnover, 2)
         net = round(gross - friction, 2)
 
         p["exit_date"] = final_date
         p["exit_price"] = final_close
-        p["total_pnl"] = round(p.get("t1_pnl", 0.0) + net, 2)
+        p["gross_pnl"] = round(gross, 2)
+        p["friction"] = friction
+        p["total_pnl"] = net
+        p["final_stop_loss"] = round(p["stop_loss"], 2)
         p["exit_reason"] = "Backtest Window Ended (Mark to Market)"
         closed_trades.append(p)
 
@@ -521,6 +485,11 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
     avg_loss = losing_trades["total_pnl"].mean() if loss_count > 0 else 0.0
     avg_trade_pnl = df_trades["total_pnl"].mean() if total_trades_count > 0 else 0.0
 
+    # Stage breakdowns
+    stage_0_exits = len(df_trades[df_trades["stage"] == 0])
+    stage_1_exits = len(df_trades[df_trades["stage"] == 1])
+    stage_2_exits = len(df_trades[df_trades["stage"] == 2])
+
     metrics = {
         "start_date": backtest_dates[0],
         "end_date": backtest_dates[-1],
@@ -542,14 +511,17 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
         "avg_win": avg_win,
         "avg_loss": avg_loss,
         "avg_trade_pnl": avg_trade_pnl,
+        "stage_0_exits": stage_0_exits,
+        "stage_1_exits": stage_1_exits,
+        "stage_2_exits": stage_2_exits,
     }
 
     # Format and save backtest results CSV
     export_cols = [
-        "id", "symbol", "entry_date", "entry_price", "initial_qty", "cost",
-        "stop_loss", "target_1", "t1_exit_date", "t1_exit_price", "t1_qty", "t1_pnl",
-        "runner_exit_date", "runner_exit_price", "runner_qty", "runner_pnl",
-        "exit_date", "exit_price", "total_pnl", "exit_reason", "relative_strength", "rsi"
+        "id", "symbol", "entry_date", "entry_price", "qty", "cost",
+        "initial_stop_loss", "final_stop_loss", "highest_close", "max_r_reached",
+        "stage", "exit_date", "exit_price", "gross_pnl", "friction", "total_pnl",
+        "exit_reason", "relative_strength", "rsi"
     ]
     available_cols = [c for c in export_cols if c in df_trades.columns]
     df_trades_export = df_trades[available_cols].copy()
@@ -564,33 +536,36 @@ def run_backtest() -> Tuple[Dict[str, Any], pd.DataFrame, pd.DataFrame]:
 
 def print_backtest_summary(m: Dict[str, Any]) -> None:
     """Print an executive performance summary table to the terminal."""
-    print("\n" + "=" * 80)
-    print("      VOLATILITY-ADJUSTED SWING STRATEGY: 3-YEAR PERFORMANCE REPORT")
-    print("=" * 80)
+    print("\n" + "=" * 82)
+    print("      2-STAGE DYNAMIC ATR TRAILING SWING STRATEGY: 3-YEAR PERFORMANCE")
+    print("=" * 82)
     print(f"Backtest Period        : {m['start_date']}  to  {m['end_date']} ({m['trading_sessions']} sessions)")
     print(f"Screening Universe     : Nifty 200 Daily (Macro Trend + 20 EMA Pullback Confluence)")
-    print(f"Benchmark Regime Filter: Nifty 50 Close > 50-day EMA")
-    print(f"Risk Management Model  : Rs 2,000 risk (1.5x ATR Stop) | Hybrid Exit (50% T1 / 50% 10-EMA Trail)")
-    print("-" * 80)
+    print(f"Benchmark Regime Filter: Nifty 50 Close > 50-day EMA (Defensive Entry Halt)")
+    print(f"Trailing Stop Engine   : Stage 1 (+1.5R Breakeven) -> Stage 2 (+2.5R Chandelier 2.5x ATR)")
+    print(f"Portfolio Sizing Model : 5 Concurrent Slots (Rs 40k/slot) | Rs 2,000 Risk/Trade (1.5x ATR)")
+    print("-" * 82)
     print(f"Initial Starting Capital: Rs {m['initial_capital']:>14,.2f}")
     print(f"Ending Portfolio Equity : Rs {m['final_equity']:>14,.2f}")
     print(f"Total Strategy Net P&L  : Rs {m['total_net_pnl']:>+14,.2f}")
     print(f"Strategy Total Return   :    {m['strategy_return_pct']:>13.2f} %")
     print(f"Nifty 50 Buy & Hold Ret :    {m['nifty_bh_return_pct']:>13.2f} %")
     print(f"Strategy Excess Alpha   :    {m['alpha_pct']:>+13.2f} %")
-    print("-" * 80)
+    print("-" * 82)
     print(f"Total Executed Trades   :    {m['total_trades']:>14d}")
     print(f"Winning Trades          :    {m['winning_trades']:>14d} ({m['win_rate_pct']:.1f}%)")
     print(f"Losing Trades           :    {m['losing_trades']:>14d} ({100 - m['win_rate_pct']:.1f}%)")
     print(f"Profit Factor           :    {m['profit_factor']:>14.2f}")
     print(f"Maximum Strategy DD (%) :    {m['max_drawdown_pct']:>13.2f} %")
-    print("-" * 80)
+    print("-" * 82)
     print(f"Gross Profits Realized  : Rs {m['gross_profit']:>14,.2f}")
     print(f"Gross Losses Incurred   : Rs {m['gross_loss']:>14,.2f}")
     print(f"Average Winning Trade   : Rs {m['avg_win']:>+14,.2f}")
     print(f"Average Losing Trade    : Rs {m['avg_loss']:>+14,.2f}")
     print(f"Expectancy per Trade    : Rs {m['avg_trade_pnl']:>+14,.2f}")
-    print("=" * 80 + "\n")
+    print("-" * 82)
+    print(f"Stage Breakdown (Exits) : Stage 0 (Initial SL): {m['stage_0_exits']} | Stage 1 (BE): {m['stage_1_exits']} | Stage 2 (Chandelier): {m['stage_2_exits']}")
+    print("=" * 82 + "\n")
 
 
 if __name__ == "__main__":
