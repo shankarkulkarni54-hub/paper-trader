@@ -6,12 +6,42 @@ from datetime import datetime
 from database import DB_NAME, get_account, get_open_trades, get_all_trades, init_db
 import bot
 
+
+def format_inr(val):
+    if val is None:
+        return "₹0"
+    val = int(round(val))
+    sign = "-" if val < 0 else ""
+    s = str(abs(val))
+    if len(s) <= 3:
+        return f"{sign}₹{s}"
+    last3 = s[-3:]
+    rest = s[:-3]
+    groups = []
+    while len(rest) > 2:
+        groups.insert(0, rest[-2:])
+        rest = rest[:-2]
+    if rest:
+        groups.insert(0, rest)
+    return f"{sign}₹{','.join(groups)},{last3}"
+
+
 st.set_page_config(
     page_title="Swing Engine Dashboard - Nifty 200",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+st.markdown("""
+    <style>
+    div[data-testid="stMetricValue"] > div {
+        font-size: 1.6rem !important;
+        white-space: nowrap !important;
+        overflow: visible !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # Initialize / migrate db
 init_db()
@@ -229,27 +259,27 @@ m1, m2, m3, m4, m5 = st.columns(5)
 with m1:
     st.metric(
         label="Current Equity",
-        value=f"₹{current_equity:,.2f}",
-        delta=f"₹{equity_delta:+,.2f} ({equity_delta_pct:+.2f}%)" if equity_delta != 0 else "Baseline"
+        value=format_inr(current_equity),
+        delta=f"{format_inr(equity_delta)} ({equity_delta_pct:+.2f}%)" if equity_delta != 0 else "Baseline"
     )
 
 with m2:
     st.metric(
         label="Available Cash",
-        value=f"₹{acc['cash']:,.2f}"
+        value=format_inr(acc['cash'])
     )
 
 with m3:
     st.metric(
         label="Invested Capital",
-        value=f"₹{open_market_val:,.2f}"
+        value=format_inr(open_market_val)
     )
 
 with m4:
     st.metric(
         label="Realized P&L",
-        value=f"₹{acc['realized_pnl']:,.2f}",
-        delta=f"₹{acc['realized_pnl']:+,.2f}" if acc['realized_pnl'] != 0 else None
+        value=format_inr(acc['realized_pnl']),
+        delta=format_inr(acc['realized_pnl']) if acc['realized_pnl'] != 0 else None
     )
 
 with m5:
@@ -282,9 +312,9 @@ for i in range(5):
             <div style="background: rgba(30, 136, 229, 0.08); border: 1px solid #1E88E5; border-radius: 8px; padding: 12px; text-align: center;">
                 <div style="font-size: 11px; color: #888; font-weight: 600;">SLOT {i+1} • ACTIVE</div>
                 <div style="font-size: 16px; font-weight: bold; margin: 4px 0;">{sym}</div>
-                <div style="font-size: 13px;">{qty} shs @ ₹{entry_p:,.2f}</div>
+                <div style="font-size: 13px;">{qty} shs @ {format_inr(entry_p)}</div>
                 <div style="font-size: 13px; font-weight: 600; color: {pnl_color}; margin: 2px 0;">
-                    ₹{pos_pnl:+,.2f} ({pos_pnl_pct:+.2f}%)
+                    {format_inr(pos_pnl)} ({pos_pnl_pct:+.2f}%)
                 </div>
                 <div style="font-size: 11px; color: #666; margin-top: 4px;">{stage_str}</div>
             </div>
@@ -294,8 +324,8 @@ for i in range(5):
             <div style="background: rgba(255, 255, 255, 0.03); border: 1px dashed rgba(128, 128, 128, 0.4); border-radius: 8px; padding: 12px; text-align: center;">
                 <div style="font-size: 11px; color: #888; font-weight: 600;">SLOT {i+1}</div>
                 <div style="font-size: 15px; font-weight: 600; color: #4caf50; margin: 6px 0;">🟢 Available</div>
-                <div style="font-size: 12px; color: #888;">Max Cap: 20% (₹40,000)</div>
-                <div style="font-size: 12px; color: #888;">Invested: ₹0.00</div>
+                <div style="font-size: 12px; color: #888;">Max Cap: 20% ({format_inr(40000)})</div>
+                <div style="font-size: 12px; color: #888;">Invested: {format_inr(0)}</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -319,25 +349,25 @@ if open_trades:
         elif stage == 1:
             stage_str = "Stage 1 (Breakeven Lock)"
         else:
-            stage_str = f"Stage 2 (Chandelier Trail - Peak ₹{highest_c:,.2f})"
+            stage_str = f"Stage 2 (Chandelier Trail - Peak {format_inr(highest_c)})"
 
         positions_data.append({
             "Trade ID": f"#{t['id']}",
             "Symbol": sym,
             "Entry Date": t["entry_date"],
-            "Entry Price": f"₹{entry_p:,.2f}",
+            "Entry Price": format_inr(entry_p),
             "Qty": qty,
-            "Current Price": f"₹{curr_p:,.2f}",
-            "Trailing Stop": f"₹{t['stop_loss']:,.2f}",
+            "Current Price": format_inr(curr_p),
+            "Trailing Stop": format_inr(t['stop_loss']),
             "Max R": f"{max_r:+.2f}R",
-            "Unrealized P&L": f"₹{pos_pnl:+,.2f} ({pos_pnl_pct:+.2f}%)",
+            "Unrealized P&L": f"{format_inr(pos_pnl)} ({pos_pnl_pct:+.2f}%)",
             "Trailing Stage": stage_str
         })
         
     df_positions = pd.DataFrame(positions_data)
     st.dataframe(df_positions, use_container_width=True, hide_index=True)
 else:
-    st.info("Clean paper portfolio ready for deployment. Fresh scans and order placement begin officially on Tuesday, 2026-11-10 at 3:35 PM IST (Available Cash = ₹200,000.00 | Invested = ₹0.00).")
+    st.info(f"Clean paper portfolio ready for deployment. Fresh scans and order placement begin officially on Tuesday, 2026-11-10 at 3:35 PM IST (Available Cash = {format_inr(acc['cash'])} | Invested = {format_inr(open_market_val)}).")
 
 st.markdown("---")
 
@@ -356,11 +386,11 @@ if closed_trades:
             "Trade ID": f"#{t['id']}",
             "Symbol": t["symbol"],
             "Entry Date": t["entry_date"],
-            "Entry Price": f"₹{t['entry_price']:,.2f}",
+            "Entry Price": format_inr(t['entry_price']),
             "Qty": t["qty"],
             "Exit Date": exit_d,
-            "Exit Price": f"₹{exit_p:,.2f}",
-            "Net P&L": f"₹{pnl:+,.2f}",
+            "Exit Price": format_inr(exit_p),
+            "Net P&L": format_inr(pnl),
             "Exit Reason": reason
         })
         
