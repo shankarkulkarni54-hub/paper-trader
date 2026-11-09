@@ -88,7 +88,7 @@ with st.sidebar:
     if st.button("⚡ Run Trading Bot Scan", type="primary", use_container_width=True):
         with st.spinner("Scanning Nifty 200 & updating portfolio..."):
             try:
-                bot.run()
+                bot.run(force=True)
                 st.success("Bot scan and trade execution completed!")
                 st.rerun()
             except Exception as e:

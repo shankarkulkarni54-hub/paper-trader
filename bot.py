@@ -51,6 +51,92 @@ load_env_file()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8950347796").strip()
 
+# Official NSE Trading Holidays (including multi-year calendar and fixed annual holidays)
+NSE_HOLIDAYS = {
+    # 2024 Holidays
+    "2024-01-22": "Special Holiday (Ayodhya Ram Mandir)",
+    "2024-01-26": "Republic Day",
+    "2024-03-08": "Mahashivratri",
+    "2024-03-25": "Holi",
+    "2024-03-29": "Good Friday",
+    "2024-04-11": "Id-Ul-Fitr (Ramzan Id)",
+    "2024-04-17": "Shri Ram Navami",
+    "2024-05-01": "Maharashtra Day",
+    "2024-05-20": "General Elections (Mumbai)",
+    "2024-06-17": "Bakri Id",
+    "2024-07-17": "Muharram",
+    "2024-08-15": "Independence Day",
+    "2024-10-02": "Mahatma Gandhi Jayanti",
+    "2024-11-01": "Diwali Laxmi Pujan",
+    "2024-11-15": "Gurunanak Jayanti",
+    "2024-11-20": "Maharashtra Assembly Election",
+    "2024-12-25": "Christmas",
+
+    # 2025 Holidays
+    "2025-01-26": "Republic Day",
+    "2025-02-26": "Mahashivratri",
+    "2025-03-14": "Holi",
+    "2025-03-31": "Id-Ul-Fitr (Ramzan Id)",
+    "2025-04-10": "Mahavir Jayanti",
+    "2025-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
+    "2025-04-18": "Good Friday",
+    "2025-05-01": "Maharashtra Day",
+    "2025-06-07": "Bakri Id",
+    "2025-07-06": "Muharram",
+    "2025-08-15": "Independence Day",
+    "2025-08-27": "Ganesh Chaturthi",
+    "2025-10-02": "Mahatma Gandhi Jayanti",
+    "2025-10-21": "Diwali Balipratipada",
+    "2025-11-05": "Gurunanak Jayanti",
+    "2025-12-25": "Christmas",
+
+    # 2026 Holidays
+    "2026-01-26": "Republic Day",
+    "2026-02-16": "Mahashivratri",
+    "2026-03-04": "Holi",
+    "2026-03-20": "Id-Ul-Fitr (Ramzan Id)",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-27": "Bakri Id",
+    "2026-06-25": "Muharram",
+    "2026-08-15": "Independence Day",
+    "2026-09-14": "Ganesh Chaturthi",
+    "2026-10-02": "Mahatma Gandhi Jayanti",
+    "2026-10-20": "Dussehra",
+    "2026-11-10": "Diwali Balipratipada",
+    "2026-11-24": "Gurunanak Jayanti",
+    "2026-12-25": "Christmas",
+}
+
+
+def is_nse_holiday(dt: Optional[datetime.date] = None) -> bool:
+    """
+    Check if today's date (in Asia/Kolkata timezone) falls on a weekend (Saturday or Sunday)
+    or matches official NSE trading holidays.
+    Returns True if it is a holiday/weekend, else False.
+    """
+    if dt is None:
+        ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        dt = datetime.datetime.now(ist).date()
+
+    # Weekend check: 5 = Saturday, 6 = Sunday
+    if dt.weekday() in (5, 6):
+        return True
+
+    date_str = dt.strftime("%Y-%m-%d")
+    month_day = dt.strftime("%m-%d")
+
+    # Match against known NSE trading holiday calendar
+    if date_str in NSE_HOLIDAYS:
+        return True
+
+    # Annual fixed national holidays (Republic Day, Maharashtra Day, Independence Day, Gandhi Jayanti, Christmas)
+    if month_day in {"01-26", "05-01", "08-15", "10-02", "12-25"}:
+        return True
+
+    return False
+
 
 def send_telegram_alert(message: str) -> bool:
     """
@@ -548,8 +634,12 @@ def print_summary(scan_result: Dict[str, Any], closed_trades: List[Dict[str, Any
     print("=" * 78 + "\n")
 
 
-def run():
+def run(force: bool = False):
     """Main execution cycle."""
+    if not force and is_nse_holiday():
+        print("[INFO] Today is an NSE market holiday or weekend. Skipping scan and silencing alerts.")
+        sys.exit(0)
+
     init_db()
 
     print("[INIT] Monitoring open trades for exit conditions...")
