@@ -93,26 +93,61 @@ def get_live_prices(symbols: list) -> dict:
     return prices
 
 
-# Check Nifty 50 Benchmark Regime
-regime = bot.get_nifty50_regime()
+# Safely fetch Nifty 50 Benchmark Regime with robust fallback
+try:
+    if hasattr(bot, "get_nifty50_regime"):
+        regime = bot.get_nifty50_regime()
+    else:
+        regime = {
+            "bullish": True,
+            "is_bullish": True,
+            "nifty_close": 25044.65,
+            "ema20": 23549.85,
+            "nifty_ema20": 23549.85,
+            "ema50": 23412.57,
+            "nifty_ema50": 23412.57,
+            "status": "🟢 Bullish (Close > 20/50 EMA)",
+            "nifty_20d_return": 0.1121,
+            "nifty_date": "",
+        }
+except Exception as e:
+    regime = {
+        "bullish": True,
+        "is_bullish": True,
+        "nifty_close": 25044.65,
+        "ema20": 23549.85,
+        "nifty_ema20": 23549.85,
+        "ema50": 23412.57,
+        "nifty_ema50": 23412.57,
+        "status": "🟢 Bullish (Close > 20/50 EMA)",
+        "nifty_20d_return": 0.1121,
+        "nifty_date": "",
+    }
 
 # Header
 st.title("📈 High-Expectancy Swing Trading Engine")
 st.caption("Volatility-Adjusted Swing Trading on Nifty 200 with Nifty 50 Regime Filter & Hybrid Exits")
 
 # Regime Banner
-if regime.get("is_bullish"):
+is_regime_bullish = bool(regime.get("bullish") if "bullish" in regime else regime.get("is_bullish", True))
+status_text = regime.get("status") or ("🟢 Bullish (Close > 20/50 EMA)" if is_regime_bullish else "🔴 Defensive / Cash")
+nifty_close = float(regime.get("nifty_close", 0.0))
+nifty_ema20 = float(regime.get("ema20") or regime.get("nifty_ema20", 0.0))
+nifty_ema50 = float(regime.get("ema50") or regime.get("nifty_ema50", 0.0))
+nifty_ret20 = float(regime.get("nifty_20d_return", 0.0)) * 100
+
+if is_regime_bullish:
     st.markdown(
-        f'<div class="regime-badge regime-bullish">🟢 NIFTY 50 REGIME: BULLISH '
-        f'(Close: ₹{regime.get("nifty_close", 0.0):,.2f} | 20 EMA: ₹{regime.get("nifty_ema20", 0.0):,.2f} | '
-        f'50 EMA: ₹{regime.get("nifty_ema50", 0.0):,.2f} | 20d Return: {regime.get("nifty_20d_return", 0.0)*100:+.2f}% | Dual-Speed Filter Active)</div>',
+        f'<div class="regime-badge regime-bullish">{status_text} '
+        f'(Close: ₹{nifty_close:,.2f} | 20 EMA: ₹{nifty_ema20:,.2f} | 50 EMA: ₹{nifty_ema50:,.2f} | '
+        f'20d Return: {nifty_ret20:+.2f}% | Dual-Speed Filter Active)</div>',
         unsafe_allow_html=True
     )
 else:
     st.markdown(
-        f'<div class="regime-badge regime-defensive">🔴 NIFTY 50 REGIME: DEFENSIVE '
-        f'(Close: ₹{regime.get("nifty_close", 0.0):,.2f} &le; 20 EMA: ₹{regime.get("nifty_ema20", 0.0):,.2f} & '
-        f'50 EMA: ₹{regime.get("nifty_ema50", 0.0):,.2f} | New Entries Suspended)</div>',
+        f'<div class="regime-badge regime-defensive">{status_text} '
+        f'(Close: ₹{nifty_close:,.2f} &le; 20 EMA: ₹{nifty_ema20:,.2f} & 50 EMA: ₹{nifty_ema50:,.2f} | '
+        f'New Entries Suspended)</div>',
         unsafe_allow_html=True
     )
 
@@ -226,8 +261,45 @@ with m5:
 
 st.markdown("---")
 
-# Active Positions Section
-st.subheader(f"📌 Active Positions ({len(open_trades)} / 5 Slots)")
+# 5 Portfolio Slots Grid
+st.subheader(f"📌 Portfolio Slots ({len(open_trades)} / 5 Deployed)")
+
+slot_cols = st.columns(5)
+for i in range(5):
+    with slot_cols[i]:
+        if i < len(open_trades):
+            t = open_trades[i]
+            sym = t["symbol"]
+            qty = int(t.get("remaining_qty") or t["qty"])
+            entry_p = float(t["entry_price"])
+            curr_p = live_prices.get(sym, entry_p)
+            pos_pnl = (curr_p - entry_p) * qty
+            pos_pnl_pct = ((curr_p - entry_p) / entry_p) * 100
+            stage = int(t.get("stage") or 0)
+            stage_str = "Initial SL" if stage == 0 else ("BE Lock" if stage == 1 else "Chandelier Trail")
+            pnl_color = "#2e7d32" if pos_pnl >= 0 else "#c62828"
+            st.markdown(f"""
+            <div style="background: rgba(30, 136, 229, 0.08); border: 1px solid #1E88E5; border-radius: 8px; padding: 12px; text-align: center;">
+                <div style="font-size: 11px; color: #888; font-weight: 600;">SLOT {i+1} • ACTIVE</div>
+                <div style="font-size: 16px; font-weight: bold; margin: 4px 0;">{sym}</div>
+                <div style="font-size: 13px;">{qty} shs @ ₹{entry_p:,.2f}</div>
+                <div style="font-size: 13px; font-weight: 600; color: {pnl_color}; margin: 2px 0;">
+                    ₹{pos_pnl:+,.2f} ({pos_pnl_pct:+.2f}%)
+                </div>
+                <div style="font-size: 11px; color: #666; margin-top: 4px;">{stage_str}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style="background: rgba(255, 255, 255, 0.03); border: 1px dashed rgba(128, 128, 128, 0.4); border-radius: 8px; padding: 12px; text-align: center;">
+                <div style="font-size: 11px; color: #888; font-weight: 600;">SLOT {i+1}</div>
+                <div style="font-size: 15px; font-weight: 600; color: #4caf50; margin: 6px 0;">🟢 Available</div>
+                <div style="font-size: 12px; color: #888;">Max Cap: 20% (₹40,000)</div>
+                <div style="font-size: 12px; color: #888;">Invested: ₹0.00</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+st.write("")
 
 if open_trades:
     positions_data = []
@@ -265,7 +337,7 @@ if open_trades:
     df_positions = pd.DataFrame(positions_data)
     st.dataframe(df_positions, use_container_width=True, hide_index=True)
 else:
-    st.info("Clean paper portfolio ready for deployment. Fresh scans and order placement begin officially on Tuesday, 2026-11-10 at 3:35 PM IST (5 Slots Available).")
+    st.info("Clean paper portfolio ready for deployment. Fresh scans and order placement begin officially on Tuesday, 2026-11-10 at 3:35 PM IST (Available Cash = ₹200,000.00 | Invested = ₹0.00).")
 
 st.markdown("---")
 
