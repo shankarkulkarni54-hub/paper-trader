@@ -222,10 +222,25 @@ def close_trade(
         """, (exit_date, exit_price, pnl, status, exit_reason, trade_id))
         conn.commit()
 
+def reset_portfolio(db_path: str = DB_NAME) -> None:
+    """Reset paper trading portfolio: wipe all trades and restore 2L initial cash."""
+    with get_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM trades")
+        cursor.execute("""
+            UPDATE account
+            SET initial_capital = 200000.0,
+                cash = 200000.0,
+                realized_pnl = 0.0
+            WHERE id = 1
+        """)
+        conn.commit()
+
 if __name__ == "__main__":
     init_db()
+    reset_portfolio()
     acc = get_account()
     open_trades = get_open_trades()
-    print("Database initialized & migrated successfully.")
+    print("Database reset & initialized successfully.")
     print("Account State:", acc)
     print(f"Open Positions: {len(open_trades)}")

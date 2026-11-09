@@ -104,15 +104,15 @@ st.caption("Volatility-Adjusted Swing Trading on Nifty 200 with Nifty 50 Regime 
 if regime.get("is_bullish"):
     st.markdown(
         f'<div class="regime-badge regime-bullish">🟢 NIFTY 50 REGIME: BULLISH '
-        f'(Close: ₹{regime.get("nifty_close", 0.0):,.2f} > 50 EMA: ₹{regime.get("nifty_ema50", 0.0):,.2f} | '
-        f'20d Return: {regime.get("nifty_20d_return", 0.0)*100:+.2f}% | New Entries Active)</div>',
+        f'(Close: ₹{regime.get("nifty_close", 0.0):,.2f} | 20 EMA: ₹{regime.get("nifty_ema20", 0.0):,.2f} | '
+        f'50 EMA: ₹{regime.get("nifty_ema50", 0.0):,.2f} | 20d Return: {regime.get("nifty_20d_return", 0.0)*100:+.2f}% | Dual-Speed Filter Active)</div>',
         unsafe_allow_html=True
     )
 else:
     st.markdown(
         f'<div class="regime-badge regime-defensive">🔴 NIFTY 50 REGIME: DEFENSIVE '
-        f'(Close: ₹{regime.get("nifty_close", 0.0):,.2f} &le; 50 EMA: ₹{regime.get("nifty_ema50", 0.0):,.2f} | '
-        f'New Entries Suspended)</div>',
+        f'(Close: ₹{regime.get("nifty_close", 0.0):,.2f} &le; 20 EMA: ₹{regime.get("nifty_ema20", 0.0):,.2f} & '
+        f'50 EMA: ₹{regime.get("nifty_ema50", 0.0):,.2f} | New Entries Suspended)</div>',
         unsafe_allow_html=True
     )
 
@@ -137,19 +137,21 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("Strategy Parameters")
     st.markdown("""
-    - **Benchmark Regime**: Nifty 50 Close > 50 EMA
+    - **Benchmark Regime**: Dual-Speed Filter (`Close > 20 EMA` OR `Close > 50 EMA`)
     - **Universe**: Nifty 200 Daily
     - **Macro Trend**: Close > 200 EMA & 20 EMA > 50 EMA
     - **Pullback Dynamic**: Low &le; 20 EMA, Close > 20 EMA, Close &ge; Open
     - **RSI Filter**: 40 to 65
     - **Volume Filter**: Vol &ge; 0.85x 20-day Volume SMA
-    - **Selection**: Top 20-day Relative Strength vs Nifty 50
-    - **Max Slots**: 5 (₹40k max allocation per slot)
-    - **Risk per Trade**: ₹2,000 (1.5x ATR initial stop)
-    - **Stage 1 (Breakeven Lock)**: At +1.5R (+₹3k), stop moved to Entry Price
-    - **Stage 2 (Chandelier Trail)**: At +2.5R (+₹5k), stop = Highest Daily Close - (2.5 &times; ATR)
+    - **Selection**: Top 20-day Relative Strength vs Nifty 50 (NO sector caps)
+    - **Max Slots**: 5 concurrent slots
+    - **Dynamic Position Compounding**: 1.0% equity risk per trade (`portfolio_equity * 0.01`)
+    - **Slot Capital Ceiling**: Max 20% of current equity per trade
+    - **Stage 1 (Breakeven Lock)**: Move SL to Entry at +1.5R (+1.5 * trade_risk)
+    - **Stage 2 (Chandelier Trail)**: From +2.5R (+2.5 * trade_risk), trail stop at `Highest Close - (2.5 &times; ATR)`
     - **Exit**: 100% position closed on trailing stop touch
     - **Friction**: 0.15% per round-trip
+    - **Deployment Trade Gate**: Officially activates Tuesday, 2026-11-10 at 3:35 PM IST
     """)
     st.markdown("---")
     st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -182,14 +184,6 @@ current_equity = acc["cash"] + open_market_val
 total_trades_count = len(all_trades)
 closed_count = len(closed_trades)
 
-# Calculate Win Rate
-if closed_count > 0:
-    winning_trades = sum(1 for t in closed_trades if (t["pnl"] is not None and t["pnl"] > 0))
-    win_rate = (winning_trades / closed_count) * 100.0
-    win_rate_str = f"{win_rate:.1f}% ({winning_trades}/{closed_count})"
-else:
-    win_rate_str = "0.0% (0/0)"
-
 equity_delta = current_equity - acc["initial_capital"]
 equity_delta_pct = (equity_delta / acc["initial_capital"]) * 100
 
@@ -201,7 +195,7 @@ with m1:
     st.metric(
         label="Current Equity",
         value=f"₹{current_equity:,.2f}",
-        delta=f"₹{equity_delta:+,.2f} ({equity_delta_pct:+.2f}%)"
+        delta=f"₹{equity_delta:+,.2f} ({equity_delta_pct:+.2f}%)" if equity_delta != 0 else "Baseline"
     )
 
 with m2:
@@ -212,22 +206,22 @@ with m2:
 
 with m3:
     st.metric(
+        label="Invested Capital",
+        value=f"₹{open_market_val:,.2f}"
+    )
+
+with m4:
+    st.metric(
         label="Realized P&L",
         value=f"₹{acc['realized_pnl']:,.2f}",
         delta=f"₹{acc['realized_pnl']:+,.2f}" if acc['realized_pnl'] != 0 else None
     )
 
-with m4:
-    st.metric(
-        label="Win Rate %",
-        value=win_rate_str
-    )
-
 with m5:
     st.metric(
-        label="Total Trades",
-        value=f"{total_trades_count}",
-        delta=f"{len(open_trades)} Active"
+        label="Active Slots",
+        value=f"{len(open_trades)} / 5",
+        delta="5 Slots Available" if len(open_trades) == 0 else f"{5 - len(open_trades)} Slots Available"
     )
 
 st.markdown("---")
@@ -271,7 +265,7 @@ if open_trades:
     df_positions = pd.DataFrame(positions_data)
     st.dataframe(df_positions, use_container_width=True, hide_index=True)
 else:
-    st.info("No active positions at the moment. Run the bot scan when market is open or after daily close to identify new setups.")
+    st.info("Clean paper portfolio ready for deployment. Fresh scans and order placement begin officially on Tuesday, 2026-11-10 at 3:35 PM IST (5 Slots Available).")
 
 st.markdown("---")
 

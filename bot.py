@@ -11,6 +11,7 @@ import ta
 
 from database import (
     init_db,
+    reset_portfolio,
     get_account,
     update_account,
     get_open_trades,
@@ -27,12 +28,13 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-# Production Configuration (Test 2 Optimized Parameters)
+# Production Configuration (10-Year Validated Dynamic Compounding Engine)
 INITIAL_CAPITAL = 200000.0
 MAX_OPEN_TRADES = 5                                       # 5 concurrent slots
-MAX_CAPITAL_PER_SLOT = INITIAL_CAPITAL / MAX_OPEN_TRADES  # Rs 40,000 per slot
-RISK_PER_TRADE = 2000.0                                   # Rs 2,000 fixed initial risk (1.5x ATR stop)
+RISK_PCT_PER_TRADE = 0.01                                 # 1.0% dynamic risk of current portfolio equity
+MAX_SLOT_PCT = 0.20                                       # Max 20% capital deployed per slot
 FRICTION_RATE = 0.0015                                    # 0.15% round-trip brokerage & friction
+DEPLOYMENT_START_DATE = datetime.date(2026, 11, 10)       # Fresh entries begin Tuesday, 2026-11-10 at 3:35 PM IST
 
 NIFTY_200_CSV_URL = "https://nsearchives.nseindia.com/content/indices/ind_nifty200list.csv"
 LOCAL_CSV_NAME = "nifty200.csv"
@@ -174,7 +176,8 @@ def send_telegram_alert(message: str) -> bool:
 def get_nifty50_regime(period: str = "1y") -> Dict[str, Any]:
     """
     Download daily candles for '^NSEI' (Nifty 50).
-    Market Filter: Nifty 50 Close > 50-day EMA.
+    Dual-Speed Market Filter: Nifty 50 Close > 20-day EMA OR Close > 50-day EMA.
+    Halts new entries only if price is strictly below both.
     """
     try:
         ticker = yf.Ticker("^NSEI")
@@ -183,6 +186,7 @@ def get_nifty50_regime(period: str = "1y") -> Dict[str, Any]:
             return {
                 "is_bullish": True,
                 "nifty_close": 0.0,
+                "nifty_ema20": 0.0,
                 "nifty_ema50": 0.0,
                 "nifty_20d_return": 0.0,
                 "nifty_date": "",
@@ -193,10 +197,12 @@ def get_nifty50_regime(period: str = "1y") -> Dict[str, Any]:
         df["Date"] = pd.to_datetime(df[date_col]).dt.tz_localize(None)
         df = df.sort_values("Date").reset_index(drop=True)
 
+        df["EMA_20"] = ta.trend.EMAIndicator(close=df["Close"], window=20).ema_indicator()
         df["EMA_50"] = ta.trend.EMAIndicator(close=df["Close"], window=50).ema_indicator()
 
         latest = df.iloc[-1]
         nifty_close = float(latest["Close"])
+        nifty_ema20 = float(latest["EMA_20"])
         nifty_ema50 = float(latest["EMA_50"])
         nifty_date = str(latest["Date"])[:10]
 
@@ -206,11 +212,13 @@ def get_nifty50_regime(period: str = "1y") -> Dict[str, Any]:
         else:
             nifty_20d_return = 0.0
 
-        is_bullish = nifty_close > nifty_ema50
+        # Allow new buys if Close > 20 EMA OR Close > 50 EMA
+        is_bullish = (nifty_close > nifty_ema20) or (nifty_close > nifty_ema50)
 
         return {
             "is_bullish": is_bullish,
             "nifty_close": round(nifty_close, 2),
+            "nifty_ema20": round(nifty_ema20, 2),
             "nifty_ema50": round(nifty_ema50, 2),
             "nifty_20d_return": nifty_20d_return,
             "nifty_date": nifty_date,
@@ -220,6 +228,7 @@ def get_nifty50_regime(period: str = "1y") -> Dict[str, Any]:
         return {
             "is_bullish": True,
             "nifty_close": 0.0,
+            "nifty_ema20": 0.0,
             "nifty_ema50": 0.0,
             "nifty_20d_return": 0.0,
             "nifty_date": "",
@@ -534,8 +543,10 @@ def monitor_open_trades() -> Dict[str, Any]:
             new_stop = current_stop
             new_stage = stage
 
-            # Stage 2: When unrealized gain touches +2.5R (+Rs 5,000)
-            if current_r >= 2.5 or (unrealized_peak * qty) >= 5000.0:
+            trade_risk = round(per_share_risk * qty, 2)
+
+            # Stage 2: When unrealized gain touches +2.5R (+2.5 * trade_risk)
+            if current_r >= 2.5 or (unrealized_peak * qty) >= (2.5 * trade_risk):
                 new_stage = 2
                 chandelier_stop = round(highest_close - (2.5 * atr), 2)
                 # Monotonic ratchet upward only
@@ -562,8 +573,8 @@ def monitor_open_trades() -> Dict[str, Any]:
                         )
                         send_telegram_alert(alert_msg)
 
-            # Stage 1: When unrealized gain touches +1.5R (+Rs 3,000)
-            elif current_r >= 1.5 or (unrealized_peak * qty) >= 3000.0:
+            # Stage 1: When unrealized gain touches +1.5R (+1.5 * trade_risk)
+            elif current_r >= 1.5 or (unrealized_peak * qty) >= (1.5 * trade_risk):
                 if stage < 1:
                     new_stage = 1
                 new_stop = max(current_stop, entry_price)
@@ -601,9 +612,10 @@ def monitor_open_trades() -> Dict[str, Any]:
 
 def scan_and_enter_trades(regime: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Screen Nifty 200 universe:
-    - 5 concurrent slots with initial risk of Rs 2,000 per trade (1.5x ATR stop).
+    Screen Nifty 200 universe with 10-year validated dynamic compounding engine:
+    - Dynamic 1.0% equity risk per trade, max 20% capital ceiling per slot (5 slots max).
     - Top Relative Strength selection (NO sector restrictions).
+    - Deployment Trade Gate: Fresh entries officially begin on Tuesday, 2026-11-10 at 3:35 PM IST.
     """
     acc = get_account()
     cash = acc["cash"]
@@ -619,11 +631,30 @@ def scan_and_enter_trades(regime: Dict[str, Any]) -> Dict[str, Any]:
 
     universe = load_nifty200_universe()
 
-    # Benchmark Market Filter
+    # Deployment Trade Gate: No new buys today (2026-11-09)
+    ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+    current_date = datetime.datetime.now(ist).date()
+    if current_date < DEPLOYMENT_START_DATE:
+        print(
+            f"\n[DEPLOYMENT GATE] Today is {current_date}. "
+            f"Fresh scans and order placement begin officially on Tuesday, {DEPLOYMENT_START_DATE} at 3:35 PM IST."
+        )
+        print("[DEPLOYMENT GATE] Portfolio reset to clean Rs 2,00,000 cash. New buy entries gated today.")
+        return {
+            "universe_size": len(universe),
+            "scans_evaluated": 0,
+            "signals_found": [],
+            "executed_trades": [],
+            "regime": regime,
+            "suspended": False,
+            "gated": True,
+        }
+
+    # Benchmark Market Filter: Dual-Speed Regime Filter
     if not regime["is_bullish"]:
         print(
-            f"\n[REGIME] Nifty 50 Close (Rs {regime['nifty_close']}) <= 50 EMA (Rs {regime['nifty_ema50']}). "
-            f"Market is DEFENSIVE. New trade screening suspended."
+            f"\n[REGIME] Nifty 50 Close (Rs {regime['nifty_close']}) <= 20 EMA (Rs {regime.get('nifty_ema20', 0)}) "
+            f"and 50 EMA (Rs {regime['nifty_ema50']}). Market is DEFENSIVE. New trade screening suspended."
         )
         return {
             "universe_size": len(universe),
@@ -632,6 +663,7 @@ def scan_and_enter_trades(regime: Dict[str, Any]) -> Dict[str, Any]:
             "executed_trades": [],
             "regime": regime,
             "suspended": True,
+            "gated": False,
         }
 
     print(f"\n[SCAN] Batch downloading 1-year data for {len(universe)} Nifty 200 tickers...")
@@ -655,6 +687,12 @@ def scan_and_enter_trades(regime: Dict[str, Any]) -> Dict[str, Any]:
     # Rank qualifying candidates strictly by Relative Strength descending (NO sector restrictions)
     signals_found.sort(key=lambda s: s["relative_strength"], reverse=True)
 
+    # Dynamic 1.0% Equity Compounding
+    open_equity = sum(ot["entry_price"] * ot["qty"] for ot in open_trades)
+    portfolio_equity = cash + open_equity
+    current_risk = portfolio_equity * RISK_PCT_PER_TRADE
+    current_risk = max(1000.0, current_risk)  # Prudent floor
+
     # Execute entries for top candidates
     for setup in signals_found:
         symbol = setup["symbol"]
@@ -668,14 +706,16 @@ def scan_and_enter_trades(regime: Dict[str, Any]) -> Dict[str, Any]:
         per_share_risk = setup["per_share_risk"]
         close_price = setup["close"]
 
-        # Position sizing: floor(2000 / Per-Share Risk)
-        raw_qty = int(math.floor(RISK_PER_TRADE / per_share_risk))
-        max_qty_by_slot = int(math.floor(min(cash, MAX_CAPITAL_PER_SLOT) / close_price))
+        # Position sizing: Dynamic 1% risk bounded by 20% slot ceiling and available cash
+        raw_qty = int(math.floor(current_risk / per_share_risk))
+        max_slot_capital = portfolio_equity * MAX_SLOT_PCT
+        max_qty_by_slot = int(math.floor(min(cash, max_slot_capital) / close_price))
         qty = min(raw_qty, max_qty_by_slot)
 
         if qty >= 1:
             total_cost = round(qty * close_price, 2)
             cash = round(cash - total_cost, 2)
+            trade_risk = round(qty * per_share_risk, 2)
 
             trade_id = record_trade(
                 symbol=symbol,
@@ -684,7 +724,7 @@ def scan_and_enter_trades(regime: Dict[str, Any]) -> Dict[str, Any]:
                 qty=qty,
                 stop_loss=setup["stop_loss"],
                 per_share_risk=per_share_risk,
-                target=round(close_price + (2.0 * per_share_risk), 2)
+                target=round(close_price + (2.5 * per_share_risk), 2)
             )
 
             update_account(cash=cash, realized_pnl=realized_pnl)
@@ -701,6 +741,7 @@ def scan_and_enter_trades(regime: Dict[str, Any]) -> Dict[str, Any]:
                 "stop_loss": setup["stop_loss"],
                 "atr": setup["atr"],
                 "per_share_risk": per_share_risk,
+                "trade_risk": trade_risk,
                 "relative_strength": setup["relative_strength"],
                 "rsi": setup["rsi"],
                 "vol_ratio": setup["vol_ratio"],
@@ -709,10 +750,10 @@ def scan_and_enter_trades(regime: Dict[str, Any]) -> Dict[str, Any]:
 
             # Instant Telegram Alert
             trade_alert = (
-                f"🚀 *NEW SWING TRADE ENTERED (CHANDELIER ENGINE)*\n\n"
+                f"🚀 *NEW SWING TRADE ENTERED (DYNAMIC COMPOUNDING)*\n\n"
                 f"• *Symbol:* `{symbol}`\n"
                 f"• *Entry Price:* ₹{close_price:,.2f}\n"
-                f"• *Quantity:* {qty} shares (Allocation: ₹{total_cost:,.2f})\n"
+                f"• *Quantity:* {qty} shares (Allocation: ₹{total_cost:,.2f} | Risk: ₹{trade_risk:,.2f})\n"
                 f"• *Initial Stop-Loss (1.5x ATR):* ₹{setup['stop_loss']:,.2f}\n"
                 f"• *Stage 1 Target (+1.5R):* ₹{round(close_price + 1.5 * per_share_risk, 2):,.2f} (BE Lock)\n"
                 f"• *Stage 2 Target (+2.5R):* ₹{round(close_price + 2.5 * per_share_risk, 2):,.2f} (Chandelier Trail)\n"
@@ -729,6 +770,7 @@ def scan_and_enter_trades(regime: Dict[str, Any]) -> Dict[str, Any]:
         "executed_trades": executed_trades,
         "regime": regime,
         "suspended": False,
+        "gated": False,
     }
 
 
@@ -744,8 +786,9 @@ def send_eod_summary_alert(
     open_equity = sum(ot["entry_price"] * ot["qty"] for ot in open_trades)
     total_equity = acc["cash"] + open_equity
 
-    regime_status = "🟢 BULLISH (Close > 50 EMA)" if regime.get("is_bullish") else "🔴 DEFENSIVE (Close <= 50 EMA)"
+    regime_status = "🟢 BULLISH (Close > 20/50 EMA)" if regime.get("is_bullish") else "🔴 DEFENSIVE (Close <= 20 & 50 EMA)"
     nifty_close = regime.get("nifty_close", 0.0)
+    nifty_ema20 = regime.get("nifty_ema20", 0.0)
     nifty_ema50 = regime.get("nifty_ema50", 0.0)
     nifty_ret20 = regime.get("nifty_20d_return", 0.0) * 100
 
@@ -753,13 +796,14 @@ def send_eod_summary_alert(
     executed = scan_result.get("executed_trades", [])
     closed = monitoring_result.get("closed", [])
     trailing = monitoring_result.get("trailing_updates", [])
+    is_gated = scan_result.get("gated", False)
 
     lines = [
-        "📊 *SWING ENGINE - EOD SUMMARY (NIFTY 200)*",
+        "📊 *DYNAMIC COMPOUNDING SWING ENGINE (NIFTY 200)*",
         f"_{datetime.datetime.now().strftime('%d %b %Y | %I:%M %p IST')}_\n",
         f"🌐 *Benchmark Regime (Nifty 50):*",
         f"• *Regime:* {regime_status}",
-        f"• *Nifty 50 Close:* ₹{nifty_close:,.2f} | *50 EMA:* ₹{nifty_ema50:,.2f}",
+        f"• *Nifty 50 Close:* ₹{nifty_close:,.2f} | *20 EMA:* ₹{nifty_ema20:,.2f} | *50 EMA:* ₹{nifty_ema50:,.2f}",
         f"• *20-Day Return:* {nifty_ret20:+.2f}%\n",
         f"📌 *Active Positions ({len(open_trades)}/{MAX_OPEN_TRADES} Slots):*"
     ]
@@ -774,19 +818,22 @@ def send_eod_summary_alert(
             stage_label = f"Stage {stg} ({'Initial SL' if stg == 0 else ('BE Lock' if stg == 1 else 'Chandelier Trail')})"
             lines.append(f"  • *{sym}:* {qty} shs @ ₹{ep:,.2f} | Stop: ₹{sl:,.2f} | {stage_label}")
     else:
-        lines.append("  • No active positions")
+        lines.append("  • No active positions (5 Slots Available)")
 
-    lines.append(f"\n⚡ *Signals Today ({len(signals)} Qualifying, Ranked by RS):*")
-    if signals:
-        for s in signals[:5]:
-            lines.append(
-                f"  • *{s['symbol']}:* RS: {s['relative_strength']:+.1f}% | RSI: {s['rsi']} | "
-                f"Vol: {s['vol_ratio']}x | SL: ₹{s['stop_loss']:,.2f}"
-            )
-        if len(signals) > 5:
-            lines.append(f"    _(and {len(signals) - 5} more qualifying setups)_")
+    if is_gated:
+        lines.append(f"\n🚪 *Deployment Gate Active:* Fresh entries gated today. Live scans begin Tuesday, 10 Nov at 3:35 PM IST.")
     else:
-        lines.append("  • None qualifying today")
+        lines.append(f"\n⚡ *Signals Today ({len(signals)} Qualifying, Ranked by RS):*")
+        if signals:
+            for s in signals[:5]:
+                lines.append(
+                    f"  • *{s['symbol']}:* RS: {s['relative_strength']:+.1f}% | RSI: {s['rsi']} | "
+                    f"Vol: {s['vol_ratio']}x | SL: ₹{s['stop_loss']:,.2f}"
+                )
+            if len(signals) > 5:
+                lines.append(f"    _(and {len(signals) - 5} more qualifying setups)_")
+        else:
+            lines.append("  • None qualifying today")
 
     if executed:
         lines.append(f"\n🚀 *New Trades Opened:* {len(executed)}")
@@ -806,8 +853,8 @@ def send_eod_summary_alert(
     lines.extend([
         f"\n💼 *Portfolio & Capital:*",
         f"• *Available Cash:* ₹{acc['cash']:,.2f}",
+        f"• *Invested Capital:* ₹{open_equity:,.2f}",
         f"• *Realized P&L:* ₹{acc['realized_pnl']:+,.2f}",
-        f"• *Open Positions Value:* ₹{open_equity:,.2f}",
         f"• *Total Account Value:* ₹{total_equity:,.2f}"
     ])
 
@@ -826,17 +873,19 @@ def print_summary(
 
     regime_label = "[BULLISH]" if regime.get("is_bullish") else "[DEFENSIVE]"
     print("\n" + "=" * 80)
-    print("      2-STAGE DYNAMIC ATR CHANDELIER SWING ENGINE (NIFTY 200)")
+    print("      DYNAMIC COMPOUNDING SWING ENGINE (NIFTY 200 - 10Y DEPLOYMENT)")
     print("=" * 80)
     print(f"Timestamp: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(
         f"Benchmark Regime: {regime_label} "
-        f"(Nifty 50: Rs {regime.get('nifty_close', 0.0):,.2f} | 50 EMA: Rs {regime.get('nifty_ema50', 0.0):,.2f} | "
-        f"20d Ret: {regime.get('nifty_20d_return', 0.0)*100:+.2f}%)"
+        f"(Nifty 50: Rs {regime.get('nifty_close', 0.0):,.2f} | 20 EMA: Rs {regime.get('nifty_ema20', 0.0):,.2f} | "
+        f"50 EMA: Rs {regime.get('nifty_ema50', 0.0):,.2f} | 20d Ret: {regime.get('nifty_20d_return', 0.0)*100:+.2f}%)"
     )
 
-    if scan_result.get("suspended"):
-        print("[NOTICE] Nifty 50 below 50 EMA -> New trade entry screening SUSPENDED for defense.")
+    if scan_result.get("gated"):
+        print("[DEPLOYMENT GATE] Today is 2026-11-09. Live entries gated today. Official launch: Tuesday, 2026-11-10 at 3:35 PM IST.")
+    elif scan_result.get("suspended"):
+        print("[NOTICE] Nifty 50 below both 20 & 50 EMA -> New trade entry screening SUSPENDED for defense.")
     else:
         print(f"Universe Evaluated: {scan_result['scans_evaluated']}/{scan_result['universe_size']} tickers")
         print(f"Setups Qualifying Today: {len(scan_result['signals_found'])}")
