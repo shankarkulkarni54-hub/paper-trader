@@ -2,8 +2,8 @@ name: Daily Swing Paper Trading Bot
 
 on:
   schedule:
-    # 10:05 UTC corresponds to 15:35 (3:35 PM) IST, Monday to Friday
-    - cron: '5 10 * * 1-5'
+    # 10:08 UTC corresponds to 15:38 (3:38 PM) IST, Monday to Friday
+    - cron: '8 10 * * 1-5'
   workflow_dispatch:
 
 permissions:
