@@ -202,21 +202,23 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("Strategy Parameters")
     st.markdown("""
+    - **Strategy**: Strategy V2 (Momentum-Ranked Nifty 200 with 3-Stage Chandelier)
     - **Benchmark Regime**: Dual-Speed Filter (`Close > 20 EMA` OR `Close > 50 EMA`)
     - **Universe**: Nifty 200 Daily
+    - **Relative Strength Filter**: 110-day Mansfield RS vs Nifty 50 (`RS_Score > 0`)
     - **Macro Trend**: Close > 200 EMA & 20 EMA > 50 EMA
     - **Pullback Dynamic**: Low &le; 20 EMA, Close > 20 EMA, Close &ge; Open
     - **RSI Filter**: 40 to 65
     - **Volume Filter**: Vol &ge; 0.85x 20-day Volume SMA
-    - **Selection**: Top 20-day Relative Strength vs Nifty 50 (NO sector caps)
+    - **Selection**: Ranked descending by 110-day Mansfield RS Score (NO sector caps)
     - **Max Slots**: 5 concurrent slots
     - **Dynamic Position Compounding**: 1.0% equity risk per trade (`portfolio_equity * 0.01`)
     - **Slot Capital Ceiling**: Max 20% of current equity per trade
     - **Stage 1 (Breakeven Lock)**: Move SL to Entry at +1.5R (+1.5 * trade_risk)
     - **Stage 2 (Chandelier Trail)**: From +2.5R (+2.5 * trade_risk), trail stop at `Highest Close - (2.5 &times; ATR)`
+    - **Stage 3 (Outlier Runner)**: From +4.0R (+4.0 * trade_risk), widen trail to `Highest Close - (3.2 &times; ATR)`
     - **Exit**: 100% position closed on trailing stop touch
     - **Friction**: 0.15% per round-trip
-    - **Deployment Trade Gate**: Officially activates Tuesday, 2026-11-10 at 3:35 PM IST
     """)
     st.markdown("---")
     st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -306,7 +308,8 @@ for i in range(5):
             pos_pnl = (curr_p - entry_p) * qty
             pos_pnl_pct = ((curr_p - entry_p) / entry_p) * 100
             stage = int(t.get("stage") or 0)
-            stage_str = "Initial SL" if stage == 0 else ("BE Lock" if stage == 1 else "Chandelier Trail")
+            stage_names = {0: "Initial SL", 1: "BE Lock", 2: "Chandelier Trail", 3: "Outlier Runner"}
+            stage_str = stage_names.get(stage, "Initial SL")
             pnl_color = "#2e7d32" if pos_pnl >= 0 else "#c62828"
             st.markdown(f"""
             <div style="background: rgba(30, 136, 229, 0.08); border: 1px solid #1E88E5; border-radius: 8px; padding: 12px; text-align: center;">
@@ -348,8 +351,10 @@ if open_trades:
             stage_str = "Stage 0 (Initial SL)"
         elif stage == 1:
             stage_str = "Stage 1 (Breakeven Lock)"
-        else:
+        elif stage == 2:
             stage_str = f"Stage 2 (Chandelier Trail - Peak {format_inr(highest_c)})"
+        else:
+            stage_str = f"Stage 3 (Outlier Runner - Peak {format_inr(highest_c)})"
 
         positions_data.append({
             "Trade ID": f"#{t['id']}",
@@ -367,7 +372,7 @@ if open_trades:
     df_positions = pd.DataFrame(positions_data)
     st.dataframe(df_positions, use_container_width=True, hide_index=True)
 else:
-    st.info(f"Clean paper portfolio ready for deployment. Fresh scans and order placement begin officially on Tuesday, 2026-11-10 at 3:35 PM IST (Available Cash = {format_inr(acc['cash'])} | Invested = {format_inr(open_market_val)}).")
+    st.info(f"Clean paper portfolio ready for Strategy V2 deployment. Daily scans and order placement execute at 3:35 PM IST on NSE trading days (Available Cash = {format_inr(acc['cash'])} | Invested = {format_inr(open_market_val)}).")
 
 st.markdown("---")
 

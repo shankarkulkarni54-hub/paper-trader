@@ -4,6 +4,24 @@ from typing import List, Dict, Any, Optional
 
 DB_NAME = "paper_trading.db"
 
+# Strategy V2 3-Stage Trailing Milestones
+STAGE_INITIAL = 0
+STAGE_BE = 1
+STAGE_2 = 2
+STAGE_3 = 3
+
+STAGE_LABELS = {
+    STAGE_INITIAL: "INITIAL",
+    STAGE_BE: "BE",
+    STAGE_2: "STAGE_2",
+    STAGE_3: "STAGE_3",
+}
+
+def get_stage_label(stage: int) -> str:
+    """Return institutional stage label for a given integer stage code: INITIAL, BE, STAGE_2, STAGE_3."""
+    return STAGE_LABELS.get(stage, f"STAGE_{stage}")
+
+
 def get_connection(db_path: str = DB_NAME) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row

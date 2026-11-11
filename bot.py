@@ -217,6 +217,7 @@ def get_nifty50_regime(period: str = "1y") -> Dict[str, Any]:
         date_col = "Date" if "Date" in df.columns else df.columns[0]
         df["Date"] = pd.to_datetime(df[date_col]).dt.tz_localize(None)
         df = df.sort_values("Date").reset_index(drop=True)
+        df["DateStr"] = df["Date"].dt.strftime("%Y-%m-%d")
 
         df["EMA_20"] = ta.trend.EMAIndicator(close=df["Close"], window=20).ema_indicator()
         df["EMA_50"] = ta.trend.EMAIndicator(close=df["Close"], window=50).ema_indicator()
@@ -233,6 +234,20 @@ def get_nifty50_regime(period: str = "1y") -> Dict[str, Any]:
         else:
             nifty_20d_return = 0.0
 
+        # Build comprehensive Nifty 50 close map for 110-day Mansfield RS alignment
+        nifty_close_map = {str(r["DateStr"]): float(r["Close"]) for _, r in df.iterrows()}
+        if os.path.exists(cache_path):
+            try:
+                cdf = pd.read_csv(cache_path)
+                c_dcol = "Date" if "Date" in cdf.columns else cdf.columns[0]
+                cdf["DateStr"] = pd.to_datetime(cdf[c_dcol]).dt.strftime("%Y-%m-%d")
+                for _, cr in cdf.iterrows():
+                    ds = str(cr["DateStr"])
+                    if ds not in nifty_close_map and pd.notna(cr["Close"]):
+                        nifty_close_map[ds] = float(cr["Close"])
+            except Exception:
+                pass
+
         # Allow new buys if Close > 20 EMA OR Close > 50 EMA
         is_bullish = (nifty_close > nifty_ema20) or (nifty_close > nifty_ema50)
         status_str = "🟢 Bullish (Close > 20/50 EMA)" if is_bullish else "🔴 Defensive / Cash"
@@ -248,9 +263,21 @@ def get_nifty50_regime(period: str = "1y") -> Dict[str, Any]:
             "status": status_str,
             "nifty_20d_return": round(nifty_20d_return, 4),
             "nifty_date": nifty_date,
+            "nifty_close_map": nifty_close_map,
+            "nifty_df": df,
         }
     except Exception as e:
         print(f"[WARN] Error computing Nifty 50 benchmark regime: {e}")
+        # Build fallback map from cache
+        fallback_map = {}
+        if os.path.exists(cache_path):
+            try:
+                cdf = pd.read_csv(cache_path)
+                c_dcol = "Date" if "Date" in cdf.columns else cdf.columns[0]
+                cdf["DateStr"] = pd.to_datetime(cdf[c_dcol]).dt.strftime("%Y-%m-%d")
+                fallback_map = {str(r["DateStr"]): float(r["Close"]) for _, r in cdf.iterrows() if pd.notna(r["Close"])}
+            except Exception:
+                pass
         return {
             "bullish": True,
             "is_bullish": True,
@@ -262,6 +289,7 @@ def get_nifty50_regime(period: str = "1y") -> Dict[str, Any]:
             "status": "🟢 Bullish (Close > 20/50 EMA)",
             "nifty_20d_return": 0.1121,
             "nifty_date": "",
+            "nifty_close_map": fallback_map,
         }
 
 
@@ -364,19 +392,44 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def check_entry_setup(df: pd.DataFrame, nifty_20d_return: float) -> Optional[Dict[str, Any]]:
+def check_entry_setup(
+    df: pd.DataFrame,
+    nifty_close_map: Dict[str, float],
+    nifty_20d_return: float = 0.0
+) -> Optional[Dict[str, Any]]:
     """
-    Test 2 Confluence Setup:
+    Strategy V2 Confluence Setup:
+    - 110-day Mansfield Relative Strength vs Nifty 50: RS_Score > 0
     - Close > 200 EMA and 20 EMA > 50 EMA
     - Low <= 20 EMA, Close > 20 EMA, Close >= Open
     - RSI between 40 and 65 (healthy pullback)
     - Volume >= 0.85 * 20-day Volume SMA
-    - Stop-Loss: Entry - (1.5 * ATR)
+    - Volatility-adjusted stop-loss: Entry - (1.5 * ATR_14)
     """
-    if len(df) < 200:
+    if len(df) < 110:
         return None
 
+    # Calculate 110-day Mansfield Relative Strength against Nifty 50
+    date_col = "Date" if "Date" in df.columns else df.columns[0]
+    df["DateStr"] = pd.to_datetime(df[date_col]).dt.strftime("%Y-%m-%d")
+    df["Nifty_Close"] = df["DateStr"].map(nifty_close_map)
+
+    # Require valid prices for both stock and benchmark
+    df_rs = df.dropna(subset=["Close", "Nifty_Close"]).copy()
+    if len(df_rs) < 110:
+        return None
+
+    df["RS_Ratio"] = df["Close"] / df["Nifty_Close"]
+    df["RS_SMA_110"] = df["RS_Ratio"].rolling(window=110).mean()
+    df["RS_Score"] = (df["RS_Ratio"] / df["RS_SMA_110"]) - 1.0
+
     latest = df.iloc[-1]
+    rs_score = float(latest["RS_Score"]) if pd.notna(latest["RS_Score"]) else -999.0
+
+    # Strategy V2 Rule: Candidate MUST have positive Mansfield RS_Score vs Nifty 50
+    if rs_score <= 0.0:
+        return None
+
     close = float(latest["Close"])
     open_p = float(latest["Open"])
     high = float(latest["High"])
@@ -412,7 +465,7 @@ def check_entry_setup(df: pd.DataFrame, nifty_20d_return: float) -> Optional[Dic
     if not (macro_trend_ok and pullback_ok and rsi_ok and vol_ok):
         return None
 
-    # Calculate 20-day Relative Strength vs Nifty 50
+    # Calculate 20-day return for reference
     if len(df) >= 21:
         close_20_ago = float(df["Close"].iloc[-21])
         stock_20d_return = (close - close_20_ago) / close_20_ago
@@ -442,6 +495,7 @@ def check_entry_setup(df: pd.DataFrame, nifty_20d_return: float) -> Optional[Dic
         "atr": round(atr, 2),
         "vol_ratio": round(vol_ratio, 2),
         "relative_strength": round(relative_strength, 2),
+        "rs_score": round(rs_score, 4),
         "stock_20d_return": round(stock_20d_return * 100, 2),
         "per_share_risk": per_share_risk,
         "stop_loss": initial_stop_loss,
@@ -450,11 +504,13 @@ def check_entry_setup(df: pd.DataFrame, nifty_20d_return: float) -> Optional[Dic
 
 def monitor_open_trades() -> Dict[str, Any]:
     """
-    2-Stage ATR Chandelier Trailing Engine:
+    3-Stage Asymmetric Chandelier Trailing Engine:
     - Exit Condition: Exit full position if Low <= current Trailing Stop.
-    - Stage 1: When unrealized gain touches +1.5R (+Rs 3,000), move stop to Entry Price (Breakeven).
-    - Stage 2: When unrealized gain touches +2.5R (+Rs 5,000), activate trailing stop:
-      Trailing Stop = Highest Daily Close - (2.5 * ATR) [Ratchets upward only].
+    - Stage 1: When unrealized gain touches +1.5R (+1.5x initial risk), move stop to Entry Price (Breakeven).
+    - Stage 2: When unrealized gain touches +2.5R (+2.5x initial risk), activate Chandelier trailing stop:
+      Trailing Stop = Highest Daily Close - (2.5 * ATR_14) [Ratchets upward only].
+    - Stage 3: When unrealized gain touches +4.0R (+4.0x initial risk), expand trailing stop for outlier runners:
+      Trailing Stop = Highest Daily Close - (3.2 * ATR_14) [Ratchets upward only].
     """
     open_trades = get_open_trades()
     closed_summary = []
@@ -513,18 +569,22 @@ def monitor_open_trades() -> Dict[str, Any]:
 
             update_account(cash=cash, realized_pnl=realized_pnl)
 
-            if stage == 2:
+            if stage == 3:
+                status = "CLOSED_RUNNER"
+                exit_reason = f"Stage 3 Outlier Runner Trail (Peak Close ₹{highest_close:,.2f} - 3.2x ATR)"
+                alert_title = "🏆 *STAGE 3 OUTLIER RUNNER EXIT*"
+            elif stage == 2:
                 status = "CLOSED_CHANDELIER"
-                exit_reason = f"Chandelier Trailing Stop (Peak Close ₹{highest_close:,.2f} - 2.5x ATR)"
-                alert_title = "🏃 *CHANDELIER TRAILING STOP EXIT*"
+                exit_reason = f"Stage 2 Chandelier Trailing Stop (Peak Close ₹{highest_close:,.2f} - 2.5x ATR)"
+                alert_title = "🏃 *STAGE 2 CHANDELIER TRAILING EXIT*"
             elif stage == 1:
                 status = "CLOSED_BREAKEVEN"
-                exit_reason = "Breakeven Stop Hit (+1.5R Locked)"
-                alert_title = "🛡️ *BREAKEVEN STOP EXIT*"
+                exit_reason = "Stage 1 Breakeven Stop Hit (+1.5R Locked)"
+                alert_title = "🛡️ *STAGE 1 BREAKEVEN STOP EXIT*"
             else:
                 status = "CLOSED_SL"
-                exit_reason = "Initial Stop-Loss Hit (-1.5x ATR)"
-                alert_title = "🛑 *STOP-LOSS HIT (-1.5x ATR)*"
+                exit_reason = "Stage 0 Initial Stop-Loss Hit (-1.5x ATR)"
+                alert_title = "🛑 *STAGE 0 INITIAL STOP-LOSS HIT (-1.5x ATR)*"
 
             close_trade(
                 trade_id=trade_id,
@@ -559,27 +619,56 @@ def monitor_open_trades() -> Dict[str, Any]:
             send_telegram_alert(alert_msg)
 
         # -------------------------------------------------------------
-        # Step 2: Position not stopped out. Evaluate Ratcheting Stops.
+        # Step 2: Position not stopped out. Evaluate 3-Stage Ratcheting Stops.
         # -------------------------------------------------------------
         else:
             if close > highest_close:
                 highest_close = close
 
             unrealized_peak = high - entry_price
-            current_r = unrealized_peak / per_share_risk if per_share_risk > 0 else 0.0
-            if current_r > max_r_reached:
-                max_r_reached = round(current_r, 2)
+            current_r = (highest_close - entry_price) / per_share_risk if per_share_risk > 0 else 0.0
+            intraday_r = unrealized_peak / per_share_risk if per_share_risk > 0 else 0.0
+            if intraday_r > max_r_reached:
+                max_r_reached = round(intraday_r, 2)
 
             new_stop = current_stop
             new_stage = stage
-
             trade_risk = round(per_share_risk * qty, 2)
 
-            # Stage 2: When unrealized gain touches +2.5R (+2.5 * trade_risk)
-            if current_r >= 2.5 or (unrealized_peak * qty) >= (2.5 * trade_risk):
+            # Stage 3 (Outlier Runner Expansion): When trade crosses Entry + 4.0R
+            if current_r >= 4.0 or (unrealized_peak * qty) >= (4.0 * trade_risk):
+                new_stage = 3
+                runner_stop = round(highest_close - (3.2 * atr), 2)
+                # Monotonic ratchet upward only
+                new_stop = max(current_stop, runner_stop, entry_price)
+
+                if new_stop > current_stop or stage < 3:
+                    trailing_updates.append({
+                        "id": trade_id,
+                        "symbol": symbol,
+                        "stage": 3,
+                        "stage_label": "STAGE_3",
+                        "old_stop": current_stop,
+                        "new_stop": new_stop,
+                        "highest_close": highest_close,
+                    })
+
+                    if stage < 3:
+                        alert_msg = (
+                            f"🏆 *STAGE 3 ACTIVATED: OUTLIER RUNNER CHANDELIER*\n\n"
+                            f"• *Symbol:* `{symbol}` (+4.0R reached!)\n"
+                            f"• *Trailing Stop Widened:* ₹{new_stop:,.2f} (Peak Close ₹{highest_close:,.2f} - 3.2x ATR)\n"
+                            f"• *Trailing Buffer:* 3.2x ATR protects outlier runners from consolidation chops\n"
+                            f"• *Entry Price:* ₹{entry_price:,.2f}\n"
+                            f"• *LTP:* ₹{close:,.2f}\n"
+                            f"• *Date:* {date_str}"
+                        )
+                        send_telegram_alert(alert_msg)
+
+            # Stage 2 (Standard Chandelier Trail): When trade reaches Entry + 2.5R
+            elif current_r >= 2.5 or (unrealized_peak * qty) >= (2.5 * trade_risk):
                 new_stage = 2
                 chandelier_stop = round(highest_close - (2.5 * atr), 2)
-                # Monotonic ratchet upward only
                 new_stop = max(current_stop, chandelier_stop, entry_price)
 
                 if new_stop > current_stop or stage < 2:
@@ -587,6 +676,7 @@ def monitor_open_trades() -> Dict[str, Any]:
                         "id": trade_id,
                         "symbol": symbol,
                         "stage": 2,
+                        "stage_label": "STAGE_2",
                         "old_stop": current_stop,
                         "new_stop": new_stop,
                         "highest_close": highest_close,
@@ -603,7 +693,7 @@ def monitor_open_trades() -> Dict[str, Any]:
                         )
                         send_telegram_alert(alert_msg)
 
-            # Stage 1: When unrealized gain touches +1.5R (+1.5 * trade_risk)
+            # Stage 1 (Breakeven Lock): When trade touches Entry + 1.5R
             elif current_r >= 1.5 or (unrealized_peak * qty) >= (1.5 * trade_risk):
                 if stage < 1:
                     new_stage = 1
@@ -614,6 +704,7 @@ def monitor_open_trades() -> Dict[str, Any]:
                         "id": trade_id,
                         "symbol": symbol,
                         "stage": 1,
+                        "stage_label": "BE",
                         "old_stop": current_stop,
                         "new_stop": new_stop,
                         "highest_close": highest_close,
@@ -701,21 +792,24 @@ def scan_and_enter_trades(regime: Dict[str, Any]) -> Dict[str, Any]:
 
     data_map = fetch_all_ticker_data(universe, period="1y")
 
+    nifty_close_map = regime.get("nifty_close_map", {})
+    nifty_20d_ret = regime.get("nifty_20d_return", 0.0)
+
     for symbol in universe:
         df = data_map.get(symbol)
-        if df is None or len(df) < 200:
+        if df is None or len(df) < 110:
             continue
 
         scans_evaluated += 1
         df = calculate_indicators(df)
-        setup = check_entry_setup(df, regime["nifty_20d_return"])
+        setup = check_entry_setup(df, nifty_close_map, nifty_20d_ret)
 
         if setup:
             setup["symbol"] = symbol
             signals_found.append(setup)
 
-    # Rank qualifying candidates strictly by Relative Strength descending (NO sector restrictions)
-    signals_found.sort(key=lambda s: s["relative_strength"], reverse=True)
+    # Rank qualifying candidates strictly by 110-day Mansfield RS Score descending
+    signals_found.sort(key=lambda s: s["rs_score"], reverse=True)
 
     # Dynamic 1.0% Equity Compounding
     open_equity = sum(ot["entry_price"] * ot["qty"] for ot in open_trades)
@@ -724,7 +818,7 @@ def scan_and_enter_trades(regime: Dict[str, Any]) -> Dict[str, Any]:
     current_risk = max(1000.0, current_risk)  # Prudent floor
 
     # Execute entries for top candidates
-    for setup in signals_found:
+    for rank_idx, setup in enumerate(signals_found, start=1):
         symbol = setup["symbol"]
 
         if available_slots <= 0:
@@ -773,6 +867,7 @@ def scan_and_enter_trades(regime: Dict[str, Any]) -> Dict[str, Any]:
                 "per_share_risk": per_share_risk,
                 "trade_risk": trade_risk,
                 "relative_strength": setup["relative_strength"],
+                "rs_score": setup["rs_score"],
                 "rsi": setup["rsi"],
                 "vol_ratio": setup["vol_ratio"],
             }
@@ -780,14 +875,15 @@ def scan_and_enter_trades(regime: Dict[str, Any]) -> Dict[str, Any]:
 
             # Instant Telegram Alert
             trade_alert = (
-                f"🚀 *NEW SWING TRADE ENTERED (DYNAMIC COMPOUNDING)*\n\n"
+                f"🚀 *NEW SWING TRADE ENTERED (STRATEGY V2)*\n\n"
                 f"• *Symbol:* `{symbol}`\n"
                 f"• *Entry Price:* ₹{close_price:,.2f}\n"
                 f"• *Quantity:* {qty} shares (Allocation: ₹{total_cost:,.2f} | Risk: ₹{trade_risk:,.2f})\n"
                 f"• *Initial Stop-Loss (1.5x ATR):* ₹{setup['stop_loss']:,.2f}\n"
-                f"• *Stage 1 Target (+1.5R):* ₹{round(close_price + 1.5 * per_share_risk, 2):,.2f} (BE Lock)\n"
-                f"• *Stage 2 Target (+2.5R):* ₹{round(close_price + 2.5 * per_share_risk, 2):,.2f} (Chandelier Trail)\n"
-                f"• *Relative Strength vs Nifty:* {setup['relative_strength']:+.2f}%\n"
+                f"• *Stage 1 Target (+1.5R):* ₹{round(close_price + 1.5 * per_share_risk, 2):,.2f} (Breakeven Lock)\n"
+                f"• *Stage 2 Target (+2.5R):* ₹{round(close_price + 2.5 * per_share_risk, 2):,.2f} (Chandelier Trail - 2.5x ATR)\n"
+                f"• *Stage 3 Target (+4.0R):* ₹{round(close_price + 4.0 * per_share_risk, 2):,.2f} (Outlier Runner Trail - 3.2x ATR)\n"
+                f"• *110d Mansfield RS Score:* {setup['rs_score']:+.4f} (Rank #{rank_idx})\n"
                 f"• *RSI:* {setup['rsi']} | *Volume Ratio:* {setup['vol_ratio']}x\n"
                 f"• *Date:* {setup['date']}"
             )
@@ -829,7 +925,7 @@ def send_eod_summary_alert(
     is_gated = scan_result.get("gated", False)
 
     lines = [
-        "📊 *DYNAMIC COMPOUNDING SWING ENGINE (NIFTY 200)*",
+        "📊 *STRATEGY V2 SWING ENGINE (NIFTY 200)*",
         f"_{datetime.datetime.now().strftime('%d %b %Y | %I:%M %p IST')}_\n",
         f"🌐 *Benchmark Regime (Nifty 50):*",
         f"• *Regime:* {regime_status}",
@@ -839,13 +935,14 @@ def send_eod_summary_alert(
     ]
 
     if open_trades:
+        stage_names = {0: "Initial SL", 1: "BE Lock", 2: "Chandelier Trail", 3: "Outlier Runner"}
         for ot in open_trades:
             sym = ot["symbol"]
             qty = ot["qty"]
             ep = ot["entry_price"]
             sl = ot["stop_loss"]
             stg = int(ot.get("stage") or 0)
-            stage_label = f"Stage {stg} ({'Initial SL' if stg == 0 else ('BE Lock' if stg == 1 else 'Chandelier Trail')})"
+            stage_label = f"Stage {stg} ({stage_names.get(stg, 'Initial SL')})"
             lines.append(f"  • *{sym}:* {qty} shs @ ₹{ep:,.2f} | Stop: ₹{sl:,.2f} | {stage_label}")
     else:
         lines.append("  • No active positions (5 Slots Available)")
@@ -853,11 +950,11 @@ def send_eod_summary_alert(
     if is_gated:
         lines.append(f"\n🚪 *Deployment Gate Active:* Fresh entries gated today. Live scans begin Tuesday, 10 Nov at 3:35 PM IST.")
     else:
-        lines.append(f"\n⚡ *Signals Today ({len(signals)} Qualifying, Ranked by RS):*")
+        lines.append(f"\n⚡ *Signals Today ({len(signals)} Qualifying, Ranked by 110d RS):*")
         if signals:
-            for s in signals[:5]:
+            for idx, s in enumerate(signals[:5], start=1):
                 lines.append(
-                    f"  • *{s['symbol']}:* RS: {s['relative_strength']:+.1f}% | RSI: {s['rsi']} | "
+                    f"  • *#{idx} {s['symbol']}:* 110d RS: {s.get('rs_score', 0.0):+.4f} | RSI: {s['rsi']} | "
                     f"Vol: {s['vol_ratio']}x | SL: ₹{s['stop_loss']:,.2f}"
                 )
             if len(signals) > 5:
@@ -873,7 +970,8 @@ def send_eod_summary_alert(
     if trailing:
         lines.append(f"\n📈 *Trailing Stop Updates:* {len(trailing)}")
         for tu in trailing:
-            lines.append(f"  • {tu['symbol']}: Stop ratcheted to ₹{tu['new_stop']:,.2f} (Stage {tu['stage']})")
+            stg_lbl = tu.get("stage_label", f"Stage {tu.get('stage')}")
+            lines.append(f"  • {tu['symbol']}: Stop ratcheted to ₹{tu['new_stop']:,.2f} ({stg_lbl})")
 
     if closed:
         lines.append(f"\n🚪 *Trades Closed:* {len(closed)}")
@@ -903,7 +1001,7 @@ def print_summary(
 
     regime_label = "[BULLISH]" if regime.get("is_bullish") else "[DEFENSIVE]"
     print("\n" + "=" * 80)
-    print("      DYNAMIC COMPOUNDING SWING ENGINE (NIFTY 200 - 10Y DEPLOYMENT)")
+    print("      STRATEGY V2: 110D RS + 3-STAGE CHANDELIER (NIFTY 200)")
     print("=" * 80)
     print(f"Timestamp: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(
@@ -921,10 +1019,10 @@ def print_summary(
         print(f"Setups Qualifying Today: {len(scan_result['signals_found'])}")
 
     if scan_result.get("signals_found"):
-        print("\n--- Qualifying Signals (Ranked by Relative Strength - No Sector Cap) ---")
-        for s in scan_result["signals_found"][:8]:
+        print("\n--- Qualifying Signals (Ranked by 110-day Mansfield RS - RS_Score > 0) ---")
+        for idx, s in enumerate(scan_result["signals_found"][:8], start=1):
             print(
-                f"  * {s['symbol']:<15} | RS: {s['relative_strength']:+6.2f}% | RSI: {s['rsi']:4.1f} | "
+                f"  * #{idx:<2} {s['symbol']:<15} | 110d RS: {s.get('rs_score', 0.0):+6.4f} | RSI: {s['rsi']:4.1f} | "
                 f"Vol: {s['vol_ratio']:4.2f}x | Close: Rs {s['close']:<8} | SL: Rs {s['stop_loss']:<8}"
             )
 
@@ -933,7 +1031,8 @@ def print_summary(
     trailing = monitoring_result.get("trailing_updates", [])
     if trailing:
         for tu in trailing:
-            print(f"  * [TRAILING UPDATE] #{tu['id']} {tu['symbol']} Stop moved from Rs {tu['old_stop']} to Rs {tu['new_stop']} (Stage {tu['stage']})")
+            stg_lbl = tu.get("stage_label", f"Stage {tu.get('stage')}")
+            print(f"  * [TRAILING UPDATE] #{tu['id']} {tu['symbol']} Stop moved from Rs {tu['old_stop']} to Rs {tu['new_stop']} ({stg_lbl})")
     if closed:
         for c in closed:
             print(f"  * [{c['status']}] #{c['id']} {c['symbol']} exited @ Rs {c['exit_price']} ({c['reason']}) | Net PnL: Rs {c['net_pnl']}")
@@ -946,19 +1045,20 @@ def print_summary(
         for et in executed:
             print(
                 f"  * [BUY] {et['symbol']:<15} Qty: {et['qty']:<4} @ Rs {et['entry_price']:<8} | "
-                f"Alloc: Rs {et['cost']:<8} | SL: Rs {et['stop_loss']} | RS: {et['relative_strength']:+.1f}%"
+                f"Alloc: Rs {et['cost']:<8} | SL: Rs {et['stop_loss']} | 110d RS: {et.get('rs_score', 0.0):+.4f}"
             )
     else:
         print("  None (Slots full, no qualifying signals, or cash constrained)")
 
     print(f"\n--- Current Open Positions ({len(open_trades)}/{MAX_OPEN_TRADES}) ---")
     if open_trades:
+        stage_names = {0: "Initial SL", 1: "Breakeven Lock", 2: "Chandelier Trail", 3: "Outlier Runner"}
         for ot in open_trades:
             sym = ot["symbol"]
             qty = ot["qty"]
             sl = ot["stop_loss"]
             stg = int(ot.get("stage") or 0)
-            stage_str = "Initial SL" if stg == 0 else ("Breakeven Lock" if stg == 1 else "Chandelier Trail")
+            stage_str = stage_names.get(stg, "Initial SL")
             print(f"  * #{ot['id']} {sym:<15} Qty: {qty:<4} Entry: Rs {ot['entry_price']:<8} Stop: Rs {sl:<8} Stage: {stg} ({stage_str})")
     else:
         print("  No open positions")
@@ -985,10 +1085,10 @@ def run(force: bool = False):
     print("[INIT] Checking Nifty 50 Benchmark Trend Regime...")
     regime = get_nifty50_regime()
 
-    print("[INIT] Monitoring open positions with 2-Stage Chandelier Trailing Engine...")
+    print("[INIT] Monitoring open positions with 3-Stage Asymmetric Chandelier Trailing Engine...")
     monitoring_result = monitor_open_trades()
 
-    print("[INIT] Scanning Nifty 200 universe (Top RS, RSI 40-65, Vol >= 0.85x)...")
+    print("[INIT] Scanning Nifty 200 universe (110d Mansfield RS > 0, RSI 40-65, Vol >= 0.85x)...")
     scan_result = scan_and_enter_trades(regime)
 
     print_summary(scan_result, monitoring_result)

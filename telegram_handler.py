@@ -113,8 +113,10 @@ def get_portfolio_summary() -> Dict[str, Any]:
             stage_desc = "Stage 0 (Initial SL)"
         elif stage == 1:
             stage_desc = "Stage 1 (Breakeven Locked)"
-        else:
+        elif stage == 2:
             stage_desc = f"Stage 2 (Chandelier Trail - Peak {format_inr(highest_c)})"
+        else:
+            stage_desc = f"Stage 3 (Outlier Runner Trail - Peak {format_inr(highest_c)})"
 
         open_positions_detail.append({
             "id": t["id"],
@@ -217,7 +219,7 @@ def build_status_message() -> str:
 
     lines.extend([
         "⚙️ *Engine Specs:*",
-        "• Strategy: 20 EMA Pullback + 2-Stage ATR Chandelier",
+        "• Strategy: Strategy V2 (110d Mansfield RS + 3-Stage Chandelier)",
         "• Position Risk: 1.0% Dynamic Compounding (Max 20% / slot)",
         "• Status Listener: Active",
     ])
