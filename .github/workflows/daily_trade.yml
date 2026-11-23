@@ -35,6 +35,14 @@ jobs:
         run: |
           python bot.py
 
+      - name: Push to Supabase Cloud
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python sync_to_supabase.py
+
       - name: Commit and Push Updated Database & Logs
         run: |
           git config --global user.name "github-actions[bot]"
